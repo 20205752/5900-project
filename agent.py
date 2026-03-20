@@ -8,12 +8,12 @@ semantic logic to AI agents:
 - smalltalk replies
 - summary replies
 - rejection wording
+- profile level normalization
 - profile acknowledgement wording
 
 Local Python logic is kept only for:
 - Azure initialization
 - CLI loop
-- lightweight user level normalization/storage
 - conversation history assembly
 - agent orchestration
 """
@@ -131,6 +131,18 @@ class HistoryScopeDecision(BaseModel):
     confidence: Literal["high", "medium", "low"] = "medium"
 
 
+class ProfileLevelDecision(BaseModel):
+    normalized_level: Literal[
+        "child",
+        "middle_school",
+        "high_school",
+        "university_year_1",
+        "university",
+        "general",
+    ]
+    reason: str
+
+
 class UserProfile(BaseModel):
     level: str = "general"
 
@@ -138,26 +150,6 @@ class UserProfile(BaseModel):
 # --------------------------------------------------------------------------- #
 # Minimal local helpers
 # --------------------------------------------------------------------------- #
-
-def normalize_level(level_text: str) -> str:
-    """
-    Minimal normalization just for internal storage.
-    This is intentionally lightweight and not used for user-facing wording.
-    """
-    t = level_text.lower().strip()
-
-    if any(x in t for x in ["primary", "elementary", "小学生", "小学", "child", "kids"]):
-        return "child"
-    if any(x in t for x in ["middle school", "junior high", "初中", "middle-school"]):
-        return "middle_school"
-    if any(x in t for x in ["high school", "secondary school", "高中", "high-school"]):
-        return "high_school"
-    if any(x in t for x in ["year one", "year 1", "first year", "freshman", "大一"]):
-        return "university_year_1"
-    if any(x in t for x in ["university", "college", "本科", "大学"]):
-        return "university"
-    return "general"
-
 
 def describe_level(level: str) -> str:
     mapping = {
@@ -260,6 +252,33 @@ Use reject_reason from:
 - history_trivia_not_homework
 - too_broad_or_ungrounded_history
 - not_homework_domain
+""",
+)
+
+profile_level_agent = Agent(
+    name="Profile Level Normalizer",
+    model=azure_model,
+    output_type=ProfileLevelDecision,
+    instructions="""
+You normalize a user's stated academic level/background into one internal category.
+
+Return exactly one normalized_level:
+- child
+- middle_school
+- high_school
+- university_year_1
+- university
+- general
+
+Guidance:
+- child: primary school / elementary school / young child level
+- middle_school: junior high / middle school
+- high_school: secondary school / high school
+- university_year_1: explicitly first-year university / freshman / year 1 / 大一
+- university: general university / college / undergraduate, when first-year is not explicit
+- general: if the level is unclear
+
+Do not write user-facing text here. Only return the structured result.
 """,
 )
 
@@ -491,6 +510,12 @@ Reject reason:
     return result.final_output
 
 
+async def run_profile_level_agent(user_input: str) -> str:
+    result = await Runner.run(profile_level_agent, user_input)
+    decision = result.final_output_as(ProfileLevelDecision)
+    return decision.normalized_level
+
+
 async def run_profile_reply_agent(user_input: str, normalized_level: str) -> str:
     prompt = f"""
 User input:
@@ -558,8 +583,10 @@ async def main() -> None:
                 )
 
             if decision.route == "profile":
-                raw_level = decision.extracted_level or user_input
-                profile.level = normalize_level(raw_level)
+                normalized_level = await run_profile_level_agent(
+                    decision.extracted_level or user_input
+                )
+                profile.level = normalized_level
                 answer = await run_profile_reply_agent(user_input, profile.level)
 
             elif decision.route == "summary":
