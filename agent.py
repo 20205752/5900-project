@@ -82,9 +82,12 @@ Classify the user's input into exactly one route:
 - reject
 
 Allowed:
-- math questions, including applied math questions in real-world settings
-  such as distance, geometry, estimation, percentages, rates, units,
-  coordinates, city-centre modelling, and quantitative reasoning
+- math questions, including both computational and theoretical math
+- applied math questions in real-world settings such as distance, geometry,
+  estimation, percentages, rates, units, coordinates, city-centre modelling,
+  and quantitative reasoning
+- abstract math topics such as number systems, logic, proofs, axioms,
+  algebraic structures, discrete mathematics, and mathematical foundations
 - history questions that resemble general homework topics
 - requests to summarise the conversation so far
 - statements about user background / level
@@ -102,36 +105,41 @@ Important:
 1. A valid math/history question does NOT need to explicitly mention homework.
 2. Real-world math questions are still math questions.
    Example: computing the distance between two cities is math, not travel advice.
-3. Do NOT classify gratitude or acknowledgement as summary.
-4. If a question is clearly about history but may contain a false or incorrect premise,
+3. Theoretical mathematics questions are also valid math homework.
+   Examples that should be accepted:
+   - "Can you explain Peano arithmetic?"
+   - "What is proof by induction?"
+   - "What is a group in abstract algebra?"
+4. Do NOT classify gratitude or acknowledgement as summary.
+5. If a question is clearly about history but may contain a false or incorrect premise,
    still route it to history instead of reject.
-5. Tolerate minor spelling mistakes and infer the most likely meaning.
-6. A valid history homework question should reflect disciplinary features of history,
+6. Tolerate minor spelling mistakes and infer the most likely meaning.
+7. A valid history homework question should reflect disciplinary features of history,
    not just any fact about the past.
-7. Typical history-homework features include one or more of the following:
+8. Typical history-homework features include one or more of the following:
    - clear historical time/place/person/event context
    - asking for explanation, cause, effect, comparison, significance, or evaluation
    - involving historically significant events, states, dynasties, governments,
      wars, revolutions, social change, famous sites, or major historical figures
    - resembling a teachable classroom question rather than a trivia lookup
-8. Foundational fact questions about major countries, major political leaders,
+9. Foundational fact questions about major countries, major political leaders,
    dynasties, wars, revolutions, or historically significant states are valid history homework,
    even if they are short factual questions.
-9. Example: "Who was the first president of France?" should be accepted.
-10. Reject narrow historical trivia that looks like a fact lookup rather than homework tutoring.
+10. Example: "Who was the first president of France?" should be accepted.
+11. Reject narrow historical trivia that looks like a fact lookup rather than homework tutoring.
     Examples include:
     - birthdays of niche institutional figures
     - the first president/dean/head of a specific university
     - the construction year of a local campus building or library
     - local administrative or institutional trivia with little broader historical significance
-11. Reject questions that are too broad, vague, or weakly grounded historically.
+12. Reject questions that are too broad, vague, or weakly grounded historically.
     Examples include broad social or entertainment topics without a clear time/place/course context.
-12. Reject travel planning questions such as:
+13. Reject travel planning questions such as:
     "What is the best way to travel from Hong Kong to London?"
-13. Reject harmful or dangerous requests.
-14. If the user says something like "I'm a university year one student", use route="profile"
+14. Reject harmful or dangerous requests.
+15. If the user says something like "I'm a university year one student", use route="profile"
     and extract a short user_level.
-15. Set confidence:
+16. Set confidence:
    - high: the route is very clear
    - medium: probably correct
    - low: ambiguous case
@@ -158,6 +166,8 @@ You can help with:
 - word problems
 - estimation and quantitative reasoning
 - introductory and advanced mathematical concepts
+- mathematical logic, proofs, axioms, and theoretical foundations
+- number systems, set theory, discrete mathematics, and abstract algebra
 - practice exercise generation
 
 Style rules:
@@ -171,6 +181,7 @@ Style rules:
 Teaching rules:
 - Explain clearly and step by step when solving.
 - For applied questions, first identify the mathematical model, then solve or explain it.
+- For theoretical questions, explain the core idea intuitively first, then add formal details if helpful.
 - If the user asks for practice, generate a few suitable exercises.
 - Unless the user asks otherwise, do not reveal the full solution immediately for every practice question;
   you may provide exercises first and then offer hints or solutions.
@@ -304,23 +315,44 @@ def smalltalk_reply(text: str) -> str:
 def build_reject_message(reject_reason: Optional[str]) -> str:
     reason_map = {
         "not_homework_domain": (
-            "Sorry, I can help with math and history homework, plus summarising our conversation, "
-            "but I cannot help with that request."
+            "这是一个不属于数学作业或历史作业范畴的问题，所以我不能回答。"
         ),
         "unsafe_or_inappropriate": (
-            "Sorry, I cannot help with that request."
+            "这是一个危险或不适当的问题，不属于数学作业或历史作业的正常辅导范围，所以我不能回答。"
         ),
         "history_trivia_not_homework": (
-            "Sorry, that looks more like a narrow factual lookup than a suitable math or history homework question."
+            "这是一个狭窄的历史事实查询问题，而不是典型的历史作业问题，所以我不能回答。"
         ),
         "too_broad_or_ungrounded_history": (
-            "Sorry, that question is too broad or not historically grounded enough to look like a specific math or history homework question."
+            "这是一个过于宽泛、缺少明确学科背景的问题，不属于具体的数学作业或历史作业问题，所以我不能回答。"
         ),
     }
     return reason_map.get(
         reject_reason,
-        "Sorry, I cannot help with that request."
+        "这个问题不属于数学作业或历史作业的范畴，所以我不能回答。"
     )
+
+
+def looks_like_theoretical_math_question(text: str) -> bool:
+    t = text.lower().strip()
+
+    theory_terms = [
+        "peano arithmetic", "number theory", "set theory", "logic", "proof",
+        "axiom", "axiomatic", "induction", "abstract algebra", "group theory",
+        "ring", "field", "topology", "combinatorics", "discrete math",
+        "数理逻辑", "公理", "公理化", "证明", "归纳法", "群论", "环", "域",
+        "拓扑", "组合数学", "离散数学", "皮亚诺", "皮亚诺算术"
+    ]
+
+    math_terms = [
+        "math", "mathematics", "algebra", "geometry", "theorem",
+        "数学", "代数", "几何", "定理"
+    ]
+
+    has_theory = any(x in t for x in theory_terms)
+    has_math = any(x in t for x in math_terms)
+
+    return has_theory or has_math
 
 
 def looks_like_foundational_history_question(text: str) -> bool:
@@ -394,7 +426,7 @@ def looks_like_too_broad_nonhomework_history(text: str) -> bool:
 
     development_terms = [
         "怎么发展", "如何发展", "是怎么发展的", "发展过程", "如何形成",
-        "how did it develop", "how has it developed", "development of", "how did ... develop"
+        "how did it develop", "how has it developed", "development of"
     ]
 
     grounding_terms = [
@@ -435,6 +467,19 @@ async def main() -> None:
         try:
             if looks_like_thanks(user_input):
                 answer = smalltalk_reply(user_input)
+                print(f"Assistant: {answer}\n")
+                history.append({"role": "assistant", "content": answer})
+                continue
+
+            if looks_like_theoretical_math_question(user_input):
+                math_prompt = f"""
+User level: {profile.level}
+
+Question:
+{user_input}
+"""
+                result = await Runner.run(math_tutor_agent, math_prompt)
+                answer = result.final_output
                 print(f"Assistant: {answer}\n")
                 history.append({"role": "assistant", "content": answer})
                 continue
