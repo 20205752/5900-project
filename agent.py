@@ -1,21 +1,16 @@
 """
 Interactive homework helper CLI using Azure OpenAI for all agents.
 
-This version keeps the original Azure configuration style, but moves nearly all
-semantic logic to AI agents:
-- routing
-- history scope checking
-- smalltalk replies
-- summary replies
-- rejection wording
-- profile level normalization
-- profile acknowledgement wording
+Revised version:
+- Adds a unified front-door guardrail stage
+- Keeps the original feature set as much as possible
+- Keeps history-specific scope checking for better behavior preservation
 
-Local Python logic is kept only for:
-- Azure initialization
-- CLI loop
-- conversation history assembly
-- agent orchestration
+Typical execution chain:
+1. Guardrail
+2. Router / Triage
+3. Optional history scope check
+4. Final specialist / utility agent
 """
 
 import asyncio
@@ -53,6 +48,9 @@ DEMOS = {
     "demo-thanks": "谢谢",
     "demo-hello": "bonjour",
     "demo-profile": "我是大一学生",
+    "demo-city-centre": "How can I find the centre of a city?",
+    "demo-uk-president": "Who is the first precident of UK?",
+    "demo-uk-queen": "Who is the first queen of UK?",
 }
 
 
@@ -84,6 +82,7 @@ def build_azure_model() -> OpenAIChatCompletionsModel:
         azure_endpoint=azure_endpoint,
         api_version=api_version,
     )
+
     return OpenAIChatCompletionsModel(
         openai_client=azure_client,
         model=deployment_name,
@@ -93,6 +92,20 @@ def build_azure_model() -> OpenAIChatCompletionsModel:
 # --------------------------------------------------------------------------- #
 # Schemas
 # --------------------------------------------------------------------------- #
+
+class GuardrailDecision(BaseModel):
+    allowed: bool
+    reason: str
+    reject_reason: Optional[
+        Literal[
+            "not_homework_domain",
+            "unsafe_or_inappropriate",
+            "history_trivia_not_homework",
+            "too_broad_or_ungrounded_history",
+        ]
+    ] = None
+    confidence: Literal["high", "medium", "low"] = "medium"
+
 
 class RouteDecision(BaseModel):
     route: Literal[
@@ -155,6 +168,7 @@ def describe_level(level: str) -> str:
     mapping = {
         "child": "child / primary-school level",
         "middle_school": "middle-school level",
+        "high-school": "high-school level",
         "high_school": "high-school level",
         "university_year_1": "first-year university level",
         "university": "university level",
@@ -170,11 +184,94 @@ def build_history_text(history: List[dict], max_turns: int = 16) -> str:
     return "\n".join(f"{item['role'].upper()}: {item['content']}" for item in recent)
 
 
+def build_router_prompt(history: List[dict], user_input: str, max_turns: int = 12) -> str:
+    return f"""
+Conversation so far:
+{build_history_text(history, max_turns=max_turns)}
+
+Current user message:
+{user_input}
+""".strip()
+
+
+def build_guardrail_prompt(history: List[dict], user_input: str, max_turns: int = 12) -> str:
+    return f"""
+Conversation so far:
+{build_history_text(history, max_turns=max_turns)}
+
+Current user message:
+{user_input}
+""".strip()
+
+
 # --------------------------------------------------------------------------- #
 # Agents
 # --------------------------------------------------------------------------- #
 
 azure_model = build_azure_model()
+
+guardrail_agent = Agent(
+    name="Homework Guardrail",
+    model=azure_model,
+    output_type=GuardrailDecision,
+    instructions="""
+You are the front-door guardrail for a tutoring assistant.
+
+Your job is ONLY to decide whether the assistant should continue processing
+the user input or reject it immediately.
+
+Return allowed=true when the message can continue into the tutoring workflow.
+
+Return allowed=false when the message should be rejected immediately.
+
+The assistant is designed for:
+- math
+- physics
+- chemistry
+- history
+- summary of the conversation
+- profile/background statements from the user
+- short conversational smalltalk such as hello / thanks / bye / okay
+
+Allow:
+1. Valid tutoring questions in math, physics, chemistry, or history
+2. Theoretical math questions
+3. Real-world quantitative reasoning that is fundamentally mathematical
+4. Requests to summarize the conversation
+5. User profile/background statements like "I am a first-year university student"
+6. Short smalltalk like greetings, thanks, okay, bye
+7. Foundational history questions about major countries, rulers, political systems,
+   dynasties, wars, revolutions, and historically important institutions
+8. Brief history questions about first presidents, first kings, first queens,
+   first emperors, or founders of major states, if they are historically meaningful
+9. Questions with spelling mistakes if the intended meaning is clear
+10. Questions like "How can I find the centre of a city?" because they can be treated as math
+11. Questions like "Who is the first precident of uk?" should be allowed to continue,
+    even if the premise is imperfect, because the assistant can later correct it
+
+Reject:
+1. Requests outside the tutoring/supported-assistant scope
+2. Travel planning and tourism advice
+3. Dangerous or unsafe requests
+4. Current politics or current office-holders
+5. Extremely broad, vague, or weakly grounded pseudo-history requests
+6. Narrow local institutional trivia with little educational value in history
+
+Important:
+- This is only the first-pass guardrail.
+- If a question is potentially valid history, allow it through even if it may later need
+  more detailed history scope checking.
+- Prefer allow=true when the request appears to fit one of the supported paths.
+- Do not reject just because the user is brief.
+- Do not reject just because the wording is imperfect.
+
+When rejecting, provide one reject_reason from:
+- not_homework_domain
+- unsafe_or_inappropriate
+- history_trivia_not_homework
+- too_broad_or_ungrounded_history
+""",
+)
 
 router_agent = Agent(
     name="Router",
@@ -193,11 +290,14 @@ Classify the user's input into exactly one route:
 - smalltalk
 - reject
 
+Use both the current user message and the recent conversation context.
+
 Definitions:
 - math: computational math, theoretical math, logic, proofs, algebra, geometry,
   discrete math, abstract algebra, quantitative reasoning, estimation, units,
-  coordinates, distance calculation, rate problems, percentage problems, and
-  real-world mathematical modeling
+  coordinates, distance calculation, rate problems, percentage problems,
+  geometric reasoning, center/midpoint/centroid questions, map-based coordinate reasoning,
+  and real-world mathematical modeling
 - physics: mechanics, electricity, magnetism, waves, optics, thermodynamics,
   physical problem solving
 - chemistry: atoms, bonds, equations, stoichiometry, acids/bases, pH,
@@ -212,72 +312,41 @@ Important rules:
 1. Theoretical math is valid math.
 2. Real-world quantitative reasoning is still math.
 3. Applied math in real-world settings is math, not a non-homework domain.
-   This includes:
-   - distance between two cities
-   - coordinate distance
-   - travel distance as a calculation problem
-   - rates, time, speed, estimation, geometry, and unit conversion
 4. If the user asks how to compute or calculate something, prefer math when the core task is numerical reasoning.
-5. Distinguish carefully between:
+5. Questions about finding a center, centre, midpoint, centroid, average position,
+   geometric center, or representative center of a place, shape, region, or set of points
+   are usually math if the user is asking how to determine or calculate it.
+6. "How can I find the centre of a city?" should usually be routed to math.
+7. "How do I calculate the geometric center of a city on a map?" should be routed to math.
+8. Distinguish carefully between:
+   - math: "How can I find the centre of a city?"
+   - math: "How do I calculate the center of a region on a map?"
    - math: "How do I compute the distance between Hong Kong and Shenzhen?"
    - reject/travel: "What is the best way to travel from Hong Kong to Shenzhen?"
-6. Current politics or current office-holders are NOT history homework.
-7. Narrow institutional trivia is not valid history tutoring.
-8. Overly broad pseudo-history questions with no clear historical grounding should be rejected.
-9. Travel planning should be rejected.
-10. Harmful or dangerous requests should be rejected.
-11. If user says something like "I'm a university student", use profile and extract level if possible.
-12. If user asks for a summary/recap, use summary.
+   - reject/travel: "Which district is the city center best for tourists?"
+9. Current politics or current office-holders are NOT history homework.
+10. Narrow institutional trivia is not valid history tutoring.
+11. Overly broad pseudo-history questions with no clear historical grounding should be rejected.
+12. Travel planning should be rejected.
+13. Harmful or dangerous requests should be rejected.
+14. If user says something like "I'm a university student", use profile and extract level if possible.
+15. If user asks for a summary/recap, use summary.
+16. If the current message is short but depends on recent conversation, infer the intended route from context.
 
 History-specific rule:
-13. Foundational factual questions about major countries, major political leaders,
+17. Foundational factual questions about major countries, major political leaders,
     monarchs, emperors, presidents, prime ministers, dynasties, wars, revolutions,
-    empires, and republics should usually be routed to history.
-14. Questions like "Who was the first president of France?" are history, not reject.
-15. Questions about the first ruler, first president, first emperor, or first king
-    of a historically significant state are usually valid history questions.
-16. Do not confuse foundational history with narrow local trivia.
-17. For example:
-    - valid history: "Who was the first president of France?"
-    - valid history: "法国的第一任总统是谁？"
-    - valid history: "Who was the first emperor of Rome?"
-    - reject: "Who was the first dean of a specific university?"
-    - reject: "When was a campus library built?"
-
-Routing examples:
-
-User: I want to know how to compute the distance between two cities like Hong Kong and Shenzhen
-Output route: math
-
-User: What formula gives the distance between Hong Kong and Shenzhen?
-Output route: math
-
-User: How can I estimate the distance between two points on a map?
-Output route: math
-
-User: If a car travels 80 km/h for 3 hours, how far does it go?
-Output route: math
-
-User: What is the best way to travel from Hong Kong to Shenzhen?
-Output route: reject
-
-User: Which train should I take from Hong Kong to Shenzhen?
-Output route: reject
-
-User: Plan my trip from Hong Kong to Shenzhen.
-Output route: reject
-
-User: Can you explain Peano arithmetic?
-Output route: math
-
-User: Who was the first president of France?
-Output route: history
-
-User: 法国的第一任总统是谁？
-Output route: history
-
-User: Who is the president of France?
-Output route: reject
+    empires, republics, kings, queens, and first rulers should usually be routed to history.
+18. Questions like "Who was the first president of France?" are history, not reject.
+19. Questions about the first ruler, first president, first emperor, first king,
+    or first queen of a historically significant state are usually valid history questions.
+20. Treat major-country monarchy questions as history even if the wording is brief.
+21. Spelling mistakes should not cause rejection if the intended meaning is clear.
+22. Examples:
+    - "Who is the first precident of uk?" -> history
+    - "Who is the first queen of uk?" -> history
+    - "Who was the first queen of England?" -> history
+23. Do not confuse foundational history with narrow local trivia.
 
 When rejecting, provide one reject_reason from:
 - not_homework_domain
@@ -302,13 +371,12 @@ Allow:
 - foundational factual questions about major historical figures/events/states
 - questions with educational value in history
 - foundational questions about first presidents, first emperors, first kings,
-  founders of major states, and first leaders of historically significant countries
+  first queens, founders of major states, and first leaders of historically significant countries
+- questions about major monarchies and historically important rulers
+- brief factual history questions about major countries, if they concern significant rulers or institutions
 
 Reject with allowed=false when:
 1. the question is narrow institutional/local trivia
-   examples:
-   - first president/dean/head of a university
-   - when a campus building or library was built
 2. the question is too broad or weakly grounded historically
 3. the question is about current politics or current office-holders
 4. the question is not really history
@@ -317,8 +385,15 @@ Critical distinction:
 - "Who was the first president of France?" -> allowed=true
 - "法国的第一任总统是谁？" -> allowed=true
 - "Who was the first emperor of Rome?" -> allowed=true
+- "Who was the first queen of the UK?" -> allowed=true
+- "Who is the first precident of uk?" -> allowed=true
 - "Who was the first dean of a university?" -> allowed=false
 - "When was a local campus building constructed?" -> allowed=false
+
+Important:
+- If the user's wording contains a factual mistake or category mistake, do NOT reject on that basis alone.
+- If the intended historical question is clear, allow it.
+- Example: "Who is the first president of the UK?" should be allowed, because the tutor can explain that the UK does not have presidents and can answer with the closest historically meaningful correction.
 
 Use reject_reason from:
 - history_trivia_not_homework
@@ -390,7 +465,7 @@ Your requirements:
 - be brief, polite, and clear
 - explain that the request is outside the assistant's tutoring scope
 - if the reason is unsafe_or_inappropriate, make that clear
-- if the reason is history_trivia_not_homework, explain that it is too narrow / fact-lookup-like
+- if the reason is history_trivia_not_homework, explain that it is too narrow or only a fact lookup
 - if the reason is too_broad_or_ungrounded_history, explain that it is too broad or lacks clear historical grounding
 - if the reason is not_homework_domain, explain that it does not fit math / physics / chemistry / history tutoring
 - do not be overly verbose
@@ -436,22 +511,25 @@ You can help with:
 - arithmetic
 - algebra
 - geometry
+- coordinates
 - distance and coordinates
+- center / centre / midpoint / centroid questions
+- map-based geometric reasoning
 - word problems
 - estimation and quantitative reasoning
 - introductory and advanced mathematical concepts
 - mathematical logic, proofs, axioms, and theoretical foundations
 - number systems, set theory, discrete mathematics, and abstract algebra
+- real-world mathematical modeling
 
 Style rules:
 - Be encouraging, respectful, and human.
 - Never shame the user.
 - Never say things like "you should already know this."
 - Adapt to the user's level when provided.
-- When appropriate, you may begin with one short natural sentence identifying the question type,
-  such as a practice question, a concept explanation question, or a calculation/solving question.
-- Do this only when it sounds natural. Do not force it every time.
+- When appropriate, you may begin with one short natural sentence identifying the question type.
 - Keep explanations concise, clear, and educational.
+- If a real-world question can be answered mathematically, explain the mathematical interpretation first.
 - Reply in the same language as the user unless the prompt explicitly indicates otherwise.
 """,
 )
@@ -473,9 +551,7 @@ You can help with:
 Style rules:
 - Be clear, respectful, and concise.
 - Adapt to the user's level when provided.
-- When appropriate, you may begin with one short natural sentence identifying the question type,
-  such as a practice question, a concept explanation question, or a calculation/solving question.
-- Do this only when it sounds natural. Do not force it every time.
+- When appropriate, you may begin with one short natural sentence identifying the question type.
 - Explain the physical model and assumptions when useful.
 - Use units consistently.
 - Reply in the same language as the user unless the prompt explicitly indicates otherwise.
@@ -500,9 +576,7 @@ You can help with:
 Style rules:
 - Be clear, respectful, and concise.
 - Adapt to the user's level when provided.
-- When appropriate, you may begin with one short natural sentence identifying the question type,
-  such as a practice question, a concept explanation question, or a calculation/solving question.
-- Do this only when it sounds natural. Do not force it every time.
+- When appropriate, you may begin with one short natural sentence identifying the question type.
 - Show steps for balancing and calculations.
 - Do not provide dangerous lab instructions.
 - Reply in the same language as the user unless the prompt explicitly indicates otherwise.
@@ -524,9 +598,7 @@ Scope:
 
 Style rules:
 - Adapt to the user's level when provided.
-- When appropriate, you may begin with one short natural sentence identifying the question type,
-  such as a foundational history question, a cause-and-effect question, or a significance question.
-- Do this only when it sounds natural. Do not force it every time.
+- When appropriate, you may begin with one short natural sentence identifying the question type.
 - Reply in the same language as the user unless the prompt explicitly indicates otherwise.
 
 Do not answer:
@@ -534,7 +606,11 @@ Do not answer:
 - narrow local institutional trivia
 - extremely broad and weakly grounded pseudo-history questions
 
-If the user's premise is mistaken, politely correct it and answer the closest valid interpretation.
+Important:
+- If the user's premise is mistaken, incomplete, or category-confused, politely correct it and answer the closest valid historical interpretation.
+- Do not reject merely because the user used an imprecise label.
+- Example: if asked about the "first president of the UK", explain that the UK does not have presidents and then answer with the closest relevant historical explanation.
+- Example: if asked about the "first queen of the UK", answer with the historically appropriate interpretation rather than rejecting it.
 """,
 )
 
@@ -543,11 +619,43 @@ If the user's premise is mistaken, politely correct it and answer the closest va
 # Execution helpers
 # --------------------------------------------------------------------------- #
 
-async def run_subject_agent(route: str, profile: UserProfile, user_input: str) -> str:
+async def run_guardrail(history: List[dict], user_input: str) -> GuardrailDecision:
+    prompt = build_guardrail_prompt(history, user_input)
+    result = await Runner.run(guardrail_agent, prompt)
+    return result.final_output_as(GuardrailDecision)
+
+
+async def run_router(history: List[dict], user_input: str) -> RouteDecision:
+    prompt = build_router_prompt(history, user_input)
+    result = await Runner.run(router_agent, prompt)
+    return result.final_output_as(RouteDecision)
+
+
+async def run_history_scope(user_input: str, history: List[dict]) -> HistoryScopeDecision:
+    prompt = f"""
+Recent conversation:
+{build_history_text(history, max_turns=8)}
+
+Current history question:
+{user_input}
+"""
+    result = await Runner.run(history_scope_agent, prompt)
+    return result.final_output_as(HistoryScopeDecision)
+
+
+async def run_subject_agent(
+    route: str,
+    profile: UserProfile,
+    user_input: str,
+    history: List[dict],
+) -> str:
     prompt = f"""
 User level: {describe_level(profile.level)}
 
-Question:
+Recent conversation:
+{build_history_text(history, max_turns=12)}
+
+Current question:
 {user_input}
 """
 
@@ -565,8 +673,15 @@ Question:
     return result.final_output
 
 
-async def run_smalltalk_agent(user_input: str) -> str:
-    result = await Runner.run(smalltalk_agent, user_input)
+async def run_smalltalk_agent(user_input: str, history: List[dict]) -> str:
+    prompt = f"""
+Recent conversation:
+{build_history_text(history, max_turns=8)}
+
+Current user message:
+{user_input}
+"""
+    result = await Runner.run(smalltalk_agent, prompt)
     return result.final_output
 
 
@@ -600,6 +715,20 @@ Normalized internal level:
     return result.final_output
 
 
+async def run_summary_agent(profile: UserProfile, history: List[dict], user_input: str) -> str:
+    prompt = f"""
+Current internal user level: {describe_level(profile.level)}
+
+Conversation:
+{build_history_text(history, max_turns=16)}
+
+Latest user request:
+{user_input}
+"""
+    result = await Runner.run(summary_agent, prompt)
+    return result.final_output
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
@@ -616,6 +745,9 @@ def print_header() -> None:
     print("  demo-thanks")
     print("  demo-hello")
     print("  demo-profile")
+    print("  demo-city-centre")
+    print("  demo-uk-president")
+    print("  demo-uk-queen")
     print()
 
 
@@ -642,8 +774,28 @@ async def main() -> None:
         history.append({"role": "user", "content": user_input})
 
         try:
-            route_result = await Runner.run(router_agent, user_input)
-            decision = route_result.final_output_as(RouteDecision)
+            # Step 1: unified guardrail
+            guardrail_decision = await run_guardrail(history, user_input)
+
+            if DEBUG:
+                print(
+                    f"[GUARDRAIL] allowed={guardrail_decision.allowed} | "
+                    f"confidence={guardrail_decision.confidence} | "
+                    f"reject_reason={guardrail_decision.reject_reason} | "
+                    f"reason={guardrail_decision.reason}"
+                )
+
+            if not guardrail_decision.allowed:
+                answer = await run_reject_agent(
+                    user_input,
+                    guardrail_decision.reject_reason,
+                )
+                print(f"Assistant: {answer}\n")
+                history.append({"role": "assistant", "content": answer})
+                continue
+
+            # Step 2: router / triage
+            decision = await run_router(history, user_input)
 
             if DEBUG:
                 print(
@@ -654,6 +806,7 @@ async def main() -> None:
                     f"reason={decision.reason}"
                 )
 
+            # Step 3+: specialized handling
             if decision.route == "profile":
                 normalized_level = await run_profile_level_agent(
                     decision.extracted_level or user_input
@@ -662,21 +815,13 @@ async def main() -> None:
                 answer = await run_profile_reply_agent(user_input, profile.level)
 
             elif decision.route == "summary":
-                prompt = f"""
-Current internal user level: {describe_level(profile.level)}
-
-Conversation:
-{build_history_text(history)}
-"""
-                result = await Runner.run(summary_agent, prompt)
-                answer = result.final_output
+                answer = await run_summary_agent(profile, history, user_input)
 
             elif decision.route == "smalltalk":
-                answer = await run_smalltalk_agent(user_input)
+                answer = await run_smalltalk_agent(user_input, history)
 
             elif decision.route == "history":
-                scope_result = await Runner.run(history_scope_agent, user_input)
-                scope_decision = scope_result.final_output_as(HistoryScopeDecision)
+                scope_decision = await run_history_scope(user_input, history)
 
                 if DEBUG:
                     print(
@@ -687,15 +832,31 @@ Conversation:
                     )
 
                 if not scope_decision.allowed:
-                    answer = await run_reject_agent(user_input, scope_decision.reject_reason)
+                    answer = await run_reject_agent(
+                        user_input,
+                        scope_decision.reject_reason,
+                    )
                 else:
-                    answer = await run_subject_agent("history", profile, user_input)
+                    answer = await run_subject_agent(
+                        "history",
+                        profile,
+                        user_input,
+                        history,
+                    )
 
             elif decision.route in {"math", "physics", "chemistry"}:
-                answer = await run_subject_agent(decision.route, profile, user_input)
+                answer = await run_subject_agent(
+                    decision.route,
+                    profile,
+                    user_input,
+                    history,
+                )
 
             else:
-                answer = await run_reject_agent(user_input, decision.reject_reason)
+                answer = await run_reject_agent(
+                    user_input,
+                    decision.reject_reason or "not_homework_domain",
+                )
 
             print(f"Assistant: {answer}\n")
             history.append({"role": "assistant", "content": answer})
