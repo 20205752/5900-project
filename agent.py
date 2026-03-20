@@ -36,6 +36,10 @@ DEMOS: Dict[str, str] = {
     "demo-thanks": "That's helpful, thank you.",
     "demo-false-premise": "the first president of the United Kindom",
     "demo-queen": "the first queen of the United Kindom",
+    "demo-trivia1": "清华大学的第一任校长",
+    "demo-trivia2": "清华大学第一任校长的生日是什么时候",
+    "demo-trivia3": "香港科技大学图书馆是哪年修建的",
+    "demo-valid-history-cn": "圆明园是哪年修建的",
 }
 
 
@@ -102,7 +106,7 @@ Allowed:
 - math questions, including applied math questions in real-world settings
   such as distance, geometry, estimation, percentages, rates, units,
   coordinates, city-centre modelling, and quantitative reasoning
-- history questions
+- history questions that resemble general homework topics
 - requests to summarise the conversation so far
 - statements about user background / level
 - short conversational messages such as thanks / okay / got it / hello / bye
@@ -123,13 +127,21 @@ Important:
 4. If a question is clearly about history but may contain a false or incorrect premise,
    still route it to history instead of reject.
 5. Tolerate minor spelling mistakes and infer the most likely meaning.
-6. Reject travel planning questions such as:
+6. General history homework usually concerns countries, dynasties, governments,
+   important rulers, major events, wars, revolutions, social change, famous sites,
+   or historically significant figures and institutions.
+7. Reject narrow historical trivia that looks like a fact lookup rather than homework tutoring.
+   Examples include:
+   - birthdays of niche institutional figures
+   - the first president/dean/head of a specific university
+   - the construction year of a local campus building or library
+   - local administrative or institutional trivia with little broader historical significance
+8. Reject travel planning questions such as:
    "What is the best way to travel from Hong Kong to London?"
-7. Reject harmful or dangerous requests.
-8. Reject very local institutional trivia if it is not a suitable general history homework question.
-9. If the user says something like "I'm a university year one student", use route="profile"
+9. Reject harmful or dangerous requests.
+10. If the user says something like "I'm a university year one student", use route="profile"
    and extract a short user_level.
-10. Set confidence:
+11. Set confidence:
    - high: the route is very clear
    - medium: probably correct
    - low: ambiguous case
@@ -137,7 +149,7 @@ Important:
 When rejecting, provide one reject_reason from:
 - not_homework_domain
 - unsafe_or_inappropriate
-- too_local_or_not_general_history
+- history_trivia_not_homework
 """,
 )
 
@@ -190,11 +202,16 @@ Style rules:
 
 Scope rules:
 - Answer general history homework questions clearly and accurately.
+- Do not behave like a general-purpose encyclopedia.
+- Prioritise questions that resemble teachable homework topics.
 - If the question contains a false or impossible premise, do not force an answer.
   Instead, politely correct the premise and answer the closest valid interpretation if possible.
 - Example: if a country never had a president, say so clearly.
-- If a question is very local, narrow, or institutional trivia and is unlikely to be a suitable general history homework question,
-  politely say so instead of forcing an answer.
+- If a question is only a narrow fact lookup with little educational value,
+  especially about a school, library, campus building, department, or local institution,
+  politely refuse it as outside the intended homework-tutoring scope.
+- If a question is about leadership or founding roles of a specific university or local institution,
+  politely refuse it as not suitable general history homework.
 - Do not answer dangerous or unrelated non-history questions.
 
 Teaching rules:
@@ -223,12 +240,13 @@ If the conversation is short, keep the summary to 2-4 sentences.
 
 
 def print_header() -> None:
-    print("--- SmartTutor CLI ---")
-    print("Supports: math, history, profile adaptation, summary, smalltalk, and guarded rejection.")
+    print("Welcome to SmartTutor, your personal math and history homework tutor.")
+    print("What can I help you today?")
     print("Type 'exit' or 'quit' to stop.")
     print("Demo commands:")
     for key in DEMOS:
         print(f"  {key}")
+    print()
 
 
 def build_history_text(history: List[Dict[str, str]], max_turns: int = 16) -> str:
@@ -250,6 +268,8 @@ def looks_like_thanks(text: str) -> bool:
         "ok thanks",
         "okay thanks",
         "thx",
+        "谢谢",
+        "多谢",
     ]
     return any(p in t for p in phrases)
 
@@ -266,6 +286,9 @@ def looks_like_summary_request(text: str) -> bool:
         "what we've discussed",
         "summarise our conversation",
         "summarize our conversation",
+        "总结一下",
+        "总结我们目前的对话",
+        "总结一下我们聊了什么",
     ]
     return any(k in t for k in keywords)
 
@@ -274,9 +297,9 @@ def smalltalk_reply(text: str) -> str:
     t = text.lower().strip()
     if looks_like_thanks(t):
         return "You're welcome."
-    if t in {"hi", "hello", "hey"}:
-        return "Hello. What math or history question would you like help with?"
-    if t in {"bye", "goodbye", "see you"}:
+    if t in {"hi", "hello", "hey", "你好", "您好"}:
+        return "Hello. What math or history homework question would you like help with?"
+    if t in {"bye", "goodbye", "see you", "再见"}:
         return "Goodbye."
     return "Okay."
 
@@ -290,14 +313,44 @@ def build_reject_message(reject_reason: Optional[str]) -> str:
         "unsafe_or_inappropriate": (
             "Sorry, I cannot help with that request."
         ),
-        "too_local_or_not_general_history": (
-            "Sorry, that does not look like a suitable general history homework question."
+        "history_trivia_not_homework": (
+            "Sorry, that looks more like a narrow factual lookup than a suitable math or history homework question."
         ),
     }
     return reason_map.get(
         reject_reason,
         "Sorry, I cannot help with that request."
     )
+
+
+def looks_like_history_trivia_not_homework(text: str) -> bool:
+    t = text.lower().strip()
+
+    institution_terms = [
+        "university", "college", "school", "library", "campus",
+        "department", "institute", "hkust", "tsinghua",
+        "hong kong university of science and technology",
+        "清华大学", "香港科技大学", "图书馆", "学院", "学校", "大学", "校长",
+    ]
+
+    trivia_terms = [
+        "first president", "first principal", "first dean", "first head",
+        "founding president", "birthday", "date of birth",
+        "when was it built", "when was it founded",
+        "第一任校长", "生日", "哪年修建", "哪年建成", "哪年建的", "什么时候建",
+    ]
+
+    broader_history_terms = [
+        "war", "revolution", "dynasty", "empire", "monarchy",
+        "president of france", "industrial revolution",
+        "圆明园", "故宫", "辛亥革命", "清朝", "明朝", "法国大革命", "鸦片战争",
+    ]
+
+    has_institution = any(x in t for x in institution_terms)
+    has_trivia = any(x in t for x in trivia_terms)
+    has_broader_history = any(x in t for x in broader_history_terms)
+
+    return has_institution and has_trivia and not has_broader_history
 
 
 async def main() -> None:
@@ -325,6 +378,12 @@ async def main() -> None:
         try:
             if looks_like_thanks(user_input):
                 answer = smalltalk_reply(user_input)
+                print(f"Assistant: {answer}\n")
+                history.append({"role": "assistant", "content": answer})
+                continue
+
+            if looks_like_history_trivia_not_homework(user_input):
+                answer = build_reject_message("history_trivia_not_homework")
                 print(f"Assistant: {answer}\n")
                 history.append({"role": "assistant", "content": answer})
                 continue
