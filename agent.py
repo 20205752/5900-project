@@ -32,7 +32,6 @@ DEMOS: Dict[str, str] = {
     "demo-summary": "Can you summarise our conversation so far?",
     "demo-reject1": "What is the best way to travel from Hong Kong to London?",
     "demo-reject2": "What would happen if someone throws a firecracker on a busy street?",
-    "demo-reject3": "Who was the first president of Hong Kong University of Science and Technology in Hong Kong?",
     "demo-thanks": "That's helpful, thank you.",
     "demo-false-premise": "the first president of the United Kindom",
     "demo-queen": "the first queen of the United Kindom",
@@ -40,6 +39,8 @@ DEMOS: Dict[str, str] = {
     "demo-trivia2": "清华大学第一任校长的生日是什么时候",
     "demo-trivia3": "香港科技大学图书馆是哪年修建的",
     "demo-valid-history-cn": "圆明园是哪年修建的",
+    "demo-valid-history-analysis": "辛亥革命对中国政治发展有什么影响？",
+    "demo-valid-history-compare": "比较明朝与清朝中央集权制度的差异。",
 }
 
 
@@ -127,21 +128,26 @@ Important:
 4. If a question is clearly about history but may contain a false or incorrect premise,
    still route it to history instead of reject.
 5. Tolerate minor spelling mistakes and infer the most likely meaning.
-6. General history homework usually concerns countries, dynasties, governments,
-   important rulers, major events, wars, revolutions, social change, famous sites,
-   or historically significant figures and institutions.
-7. Reject narrow historical trivia that looks like a fact lookup rather than homework tutoring.
+6. A valid history homework question should reflect disciplinary features of history,
+   not just any fact about the past.
+7. Typical history-homework features include one or more of the following:
+   - clear historical time/place/person/event context
+   - asking for explanation, cause, effect, comparison, significance, or evaluation
+   - involving historically significant events, states, dynasties, governments,
+     wars, revolutions, social change, famous sites, or major historical figures
+   - resembling a teachable classroom question rather than a trivia lookup
+8. Reject narrow historical trivia that looks like a fact lookup rather than homework tutoring.
    Examples include:
    - birthdays of niche institutional figures
    - the first president/dean/head of a specific university
    - the construction year of a local campus building or library
    - local administrative or institutional trivia with little broader historical significance
-8. Reject travel planning questions such as:
+9. Reject travel planning questions such as:
    "What is the best way to travel from Hong Kong to London?"
-9. Reject harmful or dangerous requests.
-10. If the user says something like "I'm a university year one student", use route="profile"
+10. Reject harmful or dangerous requests.
+11. If the user says something like "I'm a university year one student", use route="profile"
    and extract a short user_level.
-11. Set confidence:
+12. Set confidence:
    - high: the route is very clear
    - medium: probably correct
    - low: ambiguous case
@@ -204,9 +210,13 @@ Scope rules:
 - Answer general history homework questions clearly and accurately.
 - Do not behave like a general-purpose encyclopedia.
 - Prioritise questions that resemble teachable homework topics.
+- A good history-homework question usually has at least one of these features:
+  1. clear historical context in time/place/person/event
+  2. asks for cause, effect, comparison, significance, evaluation, or interpretation
+  3. concerns historically significant people, states, dynasties, wars, revolutions, or sites
+  4. has clear educational value beyond a narrow factual lookup
 - If the question contains a false or impossible premise, do not force an answer.
   Instead, politely correct the premise and answer the closest valid interpretation if possible.
-- Example: if a country never had a president, say so clearly.
 - If a question is only a narrow fact lookup with little educational value,
   especially about a school, library, campus building, department, or local institution,
   politely refuse it as outside the intended homework-tutoring scope.
@@ -323,6 +333,35 @@ def build_reject_message(reject_reason: Optional[str]) -> str:
     )
 
 
+def looks_like_history_homework(text: str) -> bool:
+    t = text.lower().strip()
+
+    significant_history_terms = [
+        "war", "revolution", "dynasty", "empire", "monarchy", "republic",
+        "president of france", "industrial revolution",
+        "圆明园", "故宫", "辛亥革命", "清朝", "明朝", "唐朝", "宋朝", "元朝",
+        "法国大革命", "鸦片战争", "秦朝", "汉朝", "王朝", "革命", "战争", "朝代",
+        "帝国", "共和国", "君主制"
+    ]
+
+    analysis_terms = [
+        "why", "how", "analyze", "analyse", "compare", "evaluation", "significance",
+        "cause", "effect", "impact", "influence",
+        "为什么", "如何", "分析", "比较", "评价", "意义", "影响", "原因", "后果"
+    ]
+
+    history_question_starters = [
+        "who was", "when did", "why did", "how did",
+        "是谁", "哪一年", "哪年", "为什么", "如何"
+    ]
+
+    has_significant_topic = any(x in t for x in significant_history_terms)
+    has_analysis = any(x in t for x in analysis_terms)
+    has_history_form = any(x in t for x in history_question_starters)
+
+    return has_significant_topic or (has_history_form and has_analysis)
+
+
 def looks_like_history_trivia_not_homework(text: str) -> bool:
     t = text.lower().strip()
 
@@ -330,7 +369,7 @@ def looks_like_history_trivia_not_homework(text: str) -> bool:
         "university", "college", "school", "library", "campus",
         "department", "institute", "hkust", "tsinghua",
         "hong kong university of science and technology",
-        "清华大学", "香港科技大学", "图书馆", "学院", "学校", "大学", "校长",
+        "清华大学", "香港科技大学", "图书馆", "学院", "学校", "大学", "校园", "系"
     ]
 
     trivia_terms = [
@@ -338,19 +377,19 @@ def looks_like_history_trivia_not_homework(text: str) -> bool:
         "founding president", "birthday", "date of birth",
         "when was it built", "when was it founded",
         "第一任校长", "生日", "哪年修建", "哪年建成", "哪年建的", "什么时候建",
+        "第一任院长", "第一任负责人", "第一任馆长"
     ]
 
-    broader_history_terms = [
-        "war", "revolution", "dynasty", "empire", "monarchy",
-        "president of france", "industrial revolution",
-        "圆明园", "故宫", "辛亥革命", "清朝", "明朝", "法国大革命", "鸦片战争",
+    analysis_terms = [
+        "why", "how", "analyze", "analyse", "compare", "evaluation", "significance",
+        "为什么", "如何", "分析", "比较", "评价", "意义", "影响", "原因", "后果"
     ]
 
     has_institution = any(x in t for x in institution_terms)
     has_trivia = any(x in t for x in trivia_terms)
-    has_broader_history = any(x in t for x in broader_history_terms)
+    has_analysis = any(x in t for x in analysis_terms)
 
-    return has_institution and has_trivia and not has_broader_history
+    return has_institution and has_trivia and not has_analysis
 
 
 async def main() -> None:
@@ -439,14 +478,18 @@ Question:
                 answer = result.final_output
 
             elif decision.route == "history":
-                history_prompt = f"""
+                # 再做一次学科特征校验，防止把窄 trivia 放进 history
+                if looks_like_history_trivia_not_homework(user_input):
+                    answer = build_reject_message("history_trivia_not_homework")
+                else:
+                    history_prompt = f"""
 User level: {profile.level}
 
 Question:
 {user_input}
 """
-                result = await Runner.run(history_tutor_agent, history_prompt)
-                answer = result.final_output
+                    result = await Runner.run(history_tutor_agent, history_prompt)
+                    answer = result.final_output
 
             else:
                 if decision.confidence == "low":
