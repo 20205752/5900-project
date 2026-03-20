@@ -1,3 +1,23 @@
+"""
+Interactive homework helper CLI using Azure OpenAI for all agents.
+
+This version keeps the original Azure configuration style, but moves nearly all
+semantic logic to AI agents:
+- routing
+- history scope checking
+- smalltalk replies
+- summary replies
+- rejection wording
+- profile acknowledgement wording
+
+Local Python logic is kept only for:
+- Azure initialization
+- CLI loop
+- lightweight user level normalization/storage
+- conversation history assembly
+- agent orchestration
+"""
+
 import asyncio
 import os
 import re
@@ -14,6 +34,10 @@ from openai import AsyncAzureOpenAI
 from pydantic import BaseModel
 
 
+# --------------------------------------------------------------------------- #
+# Environment / settings
+# --------------------------------------------------------------------------- #
+
 load_dotenv()
 
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
@@ -21,6 +45,20 @@ AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY", "")
 
 DEBUG = False
 
+DEMOS = {
+    "demo-history": "Who was the first president of the United States?",
+    "demo-math": "Solve 2x + 3 = 15 for x.",
+    "demo-life": "What is the meaning of life?",
+    "demo-summary": "Can you summarize what we discussed?",
+    "demo-thanks": "谢谢",
+    "demo-hello": "bonjour",
+    "demo-profile": "我是大一学生",
+}
+
+
+# --------------------------------------------------------------------------- #
+# Model builder
+# --------------------------------------------------------------------------- #
 
 def build_azure_model() -> OpenAIChatCompletionsModel:
     if not AZURE_OPENAI_ENDPOINT or not AZURE_OPENAI_KEY:
@@ -52,6 +90,10 @@ def build_azure_model() -> OpenAIChatCompletionsModel:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Schemas
+# --------------------------------------------------------------------------- #
+
 class RouteDecision(BaseModel):
     route: Literal[
         "math",
@@ -64,8 +106,28 @@ class RouteDecision(BaseModel):
         "reject",
     ]
     reason: str
-    reject_reason: Optional[str] = None
+    reject_reason: Optional[
+        Literal[
+            "not_homework_domain",
+            "unsafe_or_inappropriate",
+            "history_trivia_not_homework",
+            "too_broad_or_ungrounded_history",
+        ]
+    ] = None
     extracted_level: Optional[str] = None
+    confidence: Literal["high", "medium", "low"] = "medium"
+
+
+class HistoryScopeDecision(BaseModel):
+    allowed: bool
+    reason: str
+    reject_reason: Optional[
+        Literal[
+            "history_trivia_not_homework",
+            "too_broad_or_ungrounded_history",
+            "not_homework_domain",
+        ]
+    ] = None
     confidence: Literal["high", "medium", "low"] = "medium"
 
 
@@ -73,7 +135,15 @@ class UserProfile(BaseModel):
     level: str = "general"
 
 
+# --------------------------------------------------------------------------- #
+# Minimal local helpers
+# --------------------------------------------------------------------------- #
+
 def normalize_level(level_text: str) -> str:
+    """
+    Minimal normalization just for internal storage.
+    This is intentionally lightweight and not used for user-facing wording.
+    """
     t = level_text.lower().strip()
 
     if any(x in t for x in ["primary", "elementary", "小学生", "小学", "child", "kids"]):
@@ -101,6 +171,17 @@ def describe_level(level: str) -> str:
     return mapping.get(level, "general level")
 
 
+def build_history_text(history: List[dict], max_turns: int = 16) -> str:
+    if not history:
+        return "(empty conversation)"
+    recent = history[-max_turns:]
+    return "\n".join(f"{item['role'].upper()}: {item['content']}" for item in recent)
+
+
+# --------------------------------------------------------------------------- #
+# Agents
+# --------------------------------------------------------------------------- #
+
 azure_model = build_azure_model()
 
 router_agent = Agent(
@@ -108,7 +189,7 @@ router_agent = Agent(
     model=azure_model,
     output_type=RouteDecision,
     instructions="""
-You are the policy/router for a multi-turn homework tutoring agent.
+You are the classifier/router for a multi-turn tutoring assistant.
 
 Classify the user's input into exactly one route:
 - math
@@ -120,82 +201,137 @@ Classify the user's input into exactly one route:
 - smalltalk
 - reject
 
-Allowed:
-- math questions, including both computational and theoretical math
-- physics questions (high-school / university level), including mechanics,
-  electricity and magnetism, waves and optics, thermodynamics, and
-  quantitative problem solving
-- chemistry questions (high-school / university level), including atomic and
-  bonding structure, balancing chemical equations, stoichiometry, reaction
-  types, and basic thermochemistry
-- applied math questions in real-world settings such as distance, geometry,
-  estimation, percentages, rates, units, coordinates, city-centre modelling,
-  and quantitative reasoning
-- abstract math topics such as number systems, logic, proofs, axioms,
-  algebraic structures, discrete mathematics, and mathematical foundations
-- history questions that resemble general homework topics
-- requests to summarise the conversation so far
-- statements about user background / level
-- short conversational messages such as thanks / okay / got it / hello / bye
+Definitions:
+- math: computational math, theoretical math, logic, proofs, algebra, geometry, discrete math, abstract algebra
+- physics: mechanics, electricity, magnetism, waves, optics, thermodynamics, physical problem solving
+- chemistry: atoms, bonds, equations, stoichiometry, acids/bases, pH, thermochemistry
+- history: educational history questions with meaningful historical context or significance
+- summary: explicit request to summarize or recap the conversation
+- profile: user states their level/background
+- smalltalk: greeting, thanks, okay, bye, acknowledgment, or brief conversational message
+- reject: anything else
 
-Return:
-- route="math" for valid math tutoring questions
-- route="physics" for valid physics tutoring questions
-- route="chemistry" for valid chemistry tutoring questions
-- route="history" for valid history tutoring questions
-- route="summary" only when the user explicitly asks to summarise or recap the conversation
-- route="profile" when the user specifies their level/background
-- route="smalltalk" for greetings, thanks, acknowledgements, or short conversational replies
-- route="reject" otherwise
-
-Important:
-1. A valid math/physics/chemistry/history question does NOT need to explicitly mention homework.
-2. Real-world math questions are still math questions.
-   Example: computing the distance between two cities is math, not travel advice.
-3. Theoretical mathematics questions are also valid math homework.
-   Examples that should be accepted:
-   - "Can you explain Peano arithmetic?"
-   - "What is proof by induction?"
-   - "What is a group in abstract algebra?"
-4. Do NOT classify gratitude or acknowledgement as summary.
-5. If a question is clearly about history but may contain a false or incorrect premise,
-   still route it to history instead of reject.
-6. Tolerate minor spelling mistakes and infer the most likely meaning.
-7. A valid history homework question should reflect disciplinary features of history,
-   not just any fact about the past.
-8. Typical history-homework features include one or more of the following:
-   - clear historical time/place/person/event context
-   - asking for explanation, cause, effect, comparison, significance, or evaluation
-   - involving historically significant events, states, dynasties, governments,
-     wars, revolutions, social change, famous sites, or major historical figures
-   - resembling a teachable classroom question rather than a trivia lookup
-9. Foundational fact questions about major countries, major political leaders,
-   dynasties, wars, revolutions, or historically significant states are valid history homework,
-   even if they are short factual questions.
-10. Example: "Who was the first president of France?" should be accepted.
-11. Reject narrow historical trivia that looks like a fact lookup rather than homework tutoring.
-    Examples include:
-    - birthdays of niche institutional figures
-    - the first president/dean/head of a specific university
-    - the construction year of a local campus building or library
-    - local administrative or institutional trivia with little broader historical significance
-12. Reject questions that are too broad, vague, or weakly grounded historically.
-    Examples include broad social or entertainment topics without a clear time/place/course context.
-13. Reject travel planning questions such as:
-    "What is the best way to travel from Hong Kong to London?"
-14. Reject harmful or dangerous requests.
-15. If the user says something like "I'm a university year one student", use route="profile"
-    and extract a short user_level.
-16. Set confidence:
-   - high: the route is very clear
-   - medium: probably correct
-   - low: ambiguous case
+Important rules:
+1. Theoretical math is valid math.
+2. Real-world quantitative reasoning is still math.
+3. Current politics or current office-holders are NOT history homework.
+4. Narrow institutional trivia is not valid history tutoring.
+5. Overly broad pseudo-history questions with no clear historical grounding should be rejected.
+6. Travel planning should be rejected.
+7. Harmful or dangerous requests should be rejected.
+8. If user says something like "I'm a university student", use profile and extract level if possible.
+9. If user asks for a summary/recap, use summary.
 
 When rejecting, provide one reject_reason from:
 - not_homework_domain
 - unsafe_or_inappropriate
 - history_trivia_not_homework
 - too_broad_or_ungrounded_history
+""",
+)
+
+history_scope_agent = Agent(
+    name="History Scope Checker",
+    model=azure_model,
+    output_type=HistoryScopeDecision,
+    instructions="""
+You decide whether a user question is an appropriate history tutoring question.
+
+Return allowed=true if the question is a valid history homework-style question.
+
+Allow:
+- historically significant people, states, dynasties, wars, revolutions, governments
+- questions about causes, effects, significance, comparison, interpretation
+- foundational factual questions about major historical figures/events/states
+- questions with educational value in history
+
+Reject with allowed=false when:
+1. the question is narrow institutional/local trivia
+   examples:
+   - first president/dean/head of a university
+   - when a campus building or library was built
+2. the question is too broad or weakly grounded historically
+   examples:
+   - vague development of humanity/society/entertainment with no time/place/course context
+3. the question is about current politics or current office-holders
+4. the question is not really history
+
+Use reject_reason from:
+- history_trivia_not_homework
+- too_broad_or_ungrounded_history
+- not_homework_domain
+""",
+)
+
+smalltalk_agent = Agent(
+    name="Smalltalk Responder",
+    model=azure_model,
+    instructions="""
+You respond to short conversational user messages.
+
+Requirements:
+- reply naturally in the same language as the user
+- keep the reply very short
+- be polite and natural
+- handle greetings, thanks, bye messages, acknowledgements, and brief conversational messages
+- do not turn the reply into tutoring unless it is natural to briefly invite a homework question
+- for greetings, you may briefly ask what math, physics, chemistry, or history question the user wants help with
+- for thanks, reply with a short equivalent of "You're welcome"
+- for bye, reply with a short goodbye
+- for short acknowledgements like "ok", "got it", "好的", "d'accord", reply briefly and naturally
+
+Do not add long explanations.
+""",
+)
+
+reject_agent = Agent(
+    name="Reject Responder",
+    model=azure_model,
+    instructions="""
+You write a short refusal/rejection message for a tutoring assistant.
+
+You will receive:
+- the user's original input
+- a reject reason code
+
+Your requirements:
+- reply in the same language as the user
+- be brief, polite, and clear
+- explain that the request is outside the assistant's tutoring scope
+- if the reason is unsafe_or_inappropriate, make that clear
+- if the reason is history_trivia_not_homework, explain that it is too narrow / fact-lookup-like
+- if the reason is too_broad_or_ungrounded_history, explain that it is too broad or lacks clear historical grounding
+- if the reason is not_homework_domain, explain that it does not fit math / physics / chemistry / history tutoring
+- do not be overly verbose
+- do not mention internal codes
+""",
+)
+
+profile_reply_agent = Agent(
+    name="Profile Reply Writer",
+    model=azure_model,
+    instructions="""
+You write a very short acknowledgement after the user states their academic level/background.
+
+You will receive:
+- the user's original message
+- the normalized internal level description
+
+Requirements:
+- reply in the same language as the user
+- acknowledge the level naturally
+- say future explanations will be adjusted to that level
+- keep it short and natural
+""",
+)
+
+summary_agent = Agent(
+    name="Summary Agent",
+    model=azure_model,
+    instructions="""
+Summarize the conversation so far in a natural, concise way.
+If the conversation is short, keep it to 2-4 sentences.
+Write in the same language the user is currently using, unless the conversation strongly suggests another language.
 """,
 )
 
@@ -215,38 +351,17 @@ You can help with:
 - introductory and advanced mathematical concepts
 - mathematical logic, proofs, axioms, and theoretical foundations
 - number systems, set theory, discrete mathematics, and abstract algebra
-- practice exercise generation
 
 Style rules:
 - Be encouraging, respectful, and human.
 - Never shame the user.
 - Never say things like "you should already know this."
-- If a topic is basic for the user's level, gently describe it as a foundational topic.
-- If a topic is advanced for the user's level, say so gently and still help.
-
-Age/level adaptation:
-- child: use very simple words, short sentences, and concrete examples.
-- middle_school: explain clearly step by step, avoid too much abstraction.
-- high_school: explain both steps and the underlying idea.
-- university_year_1: if the topic is very basic, briefly note that it is a foundational concept at this level, then explain efficiently.
-- university: be concise, structured, and slightly more formal.
-- general: be clear and balanced.
-
-Human tone examples:
-- For very basic questions at university_year_1:
-  "This is a foundational algebra step, so let’s solve it carefully."
-- For advanced topics at university_year_1:
-  "This topic is a bit beyond typical first-year material, but I can still give you an intuitive explanation first."
-
-Teaching rules:
-- Explain clearly and step by step when solving.
-- For applied questions, first identify the mathematical model, then solve or explain it.
-- For theoretical questions, explain the core idea intuitively first, then add formal details if helpful.
-- If the user asks for practice, generate a few suitable exercises.
-- Unless the user asks otherwise, do not reveal the full solution immediately for every practice question;
-  you may provide exercises first and then offer hints or solutions.
-- Adapt the difficulty and tone to the user's level if provided.
-- Keep explanations concise, human, and educational.
+- Adapt to the user's level when provided.
+- When appropriate, you may begin with one short natural sentence identifying the question type,
+  such as a practice question, a concept explanation question, or a calculation/solving question.
+- Do this only when it sounds natural. Do not force it every time.
+- Keep explanations concise, clear, and educational.
+- Reply in the same language as the user unless the prompt explicitly indicates otherwise.
 """,
 )
 
@@ -257,35 +372,22 @@ physics_tutor_agent = Agent(
 You are a supportive physics homework tutor.
 
 You can help with:
-- mechanics: kinematics, Newton's laws, forces, free-body diagrams
-- energy and momentum: work-energy theorem, conservation ideas
-- electricity and magnetism: circuits basics, EM induction concepts (as appropriate)
-- waves and optics: wave equations, reflection/refraction (as appropriate)
-- basic thermodynamics: heat, temperature, simple laws (as appropriate)
-- units, dimensional analysis, and quantitative problem solving
-- practice exercise generation
+- mechanics
+- energy and momentum
+- electricity and magnetism
+- waves and optics
+- thermodynamics
+- units and dimensional analysis
 
 Style rules:
-- Be encouraging, respectful, and human.
-- Never shame the user.
-- Keep explanations concise, human, and educational.
-
-Age/level adaptation:
-- child: use very simple words, short sentences, and concrete examples.
-- middle_school: explain clearly step by step, avoid too much abstraction.
-- high_school: explain both steps and the underlying idea.
-- university_year_1: if the topic is very basic, briefly note that it is a foundational concept at this level, then explain efficiently.
-- university: be concise, structured, and slightly more formal.
-- general: be clear and balanced.
-
-Teaching rules:
-- Explain step by step. If needed, identify the physical model (e.g., projectile motion, forces, energy approach).
-- When solving word problems, extract known/unknown variables and state key assumptions (idealizations).
-- Use units consistently; show key conversions when relevant.
-- If the user asks for practice, generate a few exercises (with hints first unless they request full solutions).
-
-Safety / scope:
-- If the user requests harmful or dangerous instructions (e.g., weaponization), refuse politely and steer back to safe physics study.
+- Be clear, respectful, and concise.
+- Adapt to the user's level when provided.
+- When appropriate, you may begin with one short natural sentence identifying the question type,
+  such as a practice question, a concept explanation question, or a calculation/solving question.
+- Do this only when it sounds natural. Do not force it every time.
+- Explain the physical model and assumptions when useful.
+- Use units consistently.
+- Reply in the same language as the user unless the prompt explicitly indicates otherwise.
 """,
 )
 
@@ -296,36 +398,23 @@ chemistry_tutor_agent = Agent(
 You are a supportive chemistry homework tutor.
 
 You can help with:
-- atomic structure, periodic table trends, and chemical bonding
-- balancing chemical equations
-- stoichiometry and reaction calculations (moles, limiting reagent, yield)
-- types of reactions and basic reaction mechanisms (at a homework-appropriate level)
-- acids and bases, and basic pH reasoning (as appropriate)
-- basic thermochemistry ideas (endothermic/exothermic, simple enthalpy reasoning)
-- practice exercise generation
+- atomic structure
+- chemical bonding
+- balancing equations
+- stoichiometry
+- acids and bases
+- pH
+- basic thermochemistry
 
 Style rules:
 - Be clear, respectful, and concise.
-- Never shame the user.
-- Keep explanations educational and easy to follow.
-
-Age/level adaptation:
-- child: use very simple words, short sentences, and concrete examples.
-- middle_school: explain the main ideas and steps clearly.
-- high_school: explain both the procedure and the chemistry reasoning behind it.
-- university_year_1: if the topic is very basic, briefly note that it is a foundational concept at this level, then explain efficiently.
-- university: be more structured and slightly more formal.
-- general: be clear and balanced.
-
-Teaching rules:
-- Start by identifying the topic (e.g., stoichiometry vs balancing equations).
-- For reaction questions: show how to balance the equation, then do the stoichiometry steps.
-- For calculations: show units and keep the math consistent.
-- If the user asks for practice, generate a few exercises suitable for their level (with hints first unless they request full answers).
-
-Safety / scope:
-- Do not provide instructions for making harmful substances.
-- If the user requests dangerous lab procedures, provide high-level educational guidance and safety-oriented refusal.
+- Adapt to the user's level when provided.
+- When appropriate, you may begin with one short natural sentence identifying the question type,
+  such as a practice question, a concept explanation question, or a calculation/solving question.
+- Do this only when it sounds natural. Do not force it every time.
+- Show steps for balancing and calculations.
+- Do not provide dangerous lab instructions.
+- Reply in the same language as the user unless the prompt explicitly indicates otherwise.
 """,
 )
 
@@ -335,437 +424,102 @@ history_tutor_agent = Agent(
     instructions="""
 You are a supportive history homework tutor.
 
+Answer educational history questions clearly and concisely.
+
+Scope:
+- historical causes, effects, significance, comparison, context
+- major countries, states, dynasties, wars, revolutions, leaders, and political systems
+- foundational fact questions about historically significant figures/events are allowed
+
 Style rules:
-- Be clear, respectful, and concise.
-- Keep a helpful and natural tone.
-- Never shame the user.
-- Tolerate minor spelling mistakes and interpret the user's likely meaning.
+- Adapt to the user's level when provided.
+- When appropriate, you may begin with one short natural sentence identifying the question type,
+  such as a foundational history question, a cause-and-effect question, or a significance question.
+- Do this only when it sounds natural. Do not force it every time.
+- Reply in the same language as the user unless the prompt explicitly indicates otherwise.
 
-Age/level adaptation:
-- child: use simple language and focus on the basic story.
-- middle_school: explain the main event, people, and outcome clearly.
-- high_school: explain context, causes, and consequences.
-- university_year_1: if the question is very basic, briefly note that it is a foundational history topic, then answer clearly.
-- university: be more analytical and structured.
-- general: be clear and balanced.
+Do not answer:
+- current politics or current office-holders
+- narrow local institutional trivia
+- extremely broad and weakly grounded pseudo-history questions
 
-Human tone examples:
-- For basic questions at university_year_1:
-  "This is a foundational topic in political history, so let’s answer it clearly."
-- For more advanced questions:
-  "This goes a bit beyond an introductory overview, but I can explain the main historical interpretation."
-
-Scope rules:
-- Answer general history homework questions clearly and accurately.
-- Do not behave like a general-purpose encyclopedia.
-- Prioritise questions that resemble teachable homework topics.
-- A good history-homework question usually has at least one of these features:
-  1. clear historical context in time/place/person/event
-  2. asks for cause, effect, comparison, significance, evaluation, or interpretation
-  3. concerns historically significant people, states, dynasties, wars, revolutions, or sites
-  4. has clear educational value beyond a narrow factual lookup
-- Foundational fact questions about major countries, major political leaders,
-  dynasties, wars, revolutions, or historically significant states should still be answered,
-  even if they are short factual questions.
-- If the question contains a false or impossible premise, do not force an answer.
-  Instead, politely correct the premise and answer the closest valid interpretation if possible.
-- If a question is only a narrow fact lookup with little educational value,
-  especially about a school, library, campus building, department, or local institution,
-  politely refuse it as outside the intended homework-tutoring scope.
-- If a question is too broad, vague, or weakly grounded historically,
-  politely refuse it as outside the intended homework-tutoring scope.
-- If a question is about leadership or founding roles of a specific university or local institution,
-  politely refuse it as not suitable general history homework.
-- Do not answer dangerous or unrelated non-history questions.
+If the user's premise is mistaken, politely correct it and answer the closest valid interpretation.
 """,
 )
 
-summary_agent = Agent(
-    name="Summary Agent",
-    model=azure_model,
-    instructions="""
-Summarise the conversation so far in a natural, conversational way.
 
-Style rules:
-- Be concise and human.
-- Do not sound like a report unless the user explicitly asks for a structured summary.
-- Mention the user's level only if it is actually relevant.
-- Focus on the main topics and helpful answers already given.
-- Do not mention minor failures or things the assistant could not help with unless the user explicitly asks for a full review.
+# --------------------------------------------------------------------------- #
+# Execution helpers
+# --------------------------------------------------------------------------- #
 
-If the conversation is short, keep the summary to 2-4 sentences.
-""",
-)
+async def run_subject_agent(route: str, profile: UserProfile, user_input: str) -> str:
+    prompt = f"""
+User level: {describe_level(profile.level)}
 
+Question:
+{user_input}
+"""
+
+    if route == "math":
+        result = await Runner.run(math_tutor_agent, prompt)
+    elif route == "physics":
+        result = await Runner.run(physics_tutor_agent, prompt)
+    elif route == "chemistry":
+        result = await Runner.run(chemistry_tutor_agent, prompt)
+    elif route == "history":
+        result = await Runner.run(history_tutor_agent, prompt)
+    else:
+        raise ValueError(f"Unsupported subject route: {route}")
+
+    return result.final_output
+
+
+async def run_smalltalk_agent(user_input: str) -> str:
+    result = await Runner.run(smalltalk_agent, user_input)
+    return result.final_output
+
+
+async def run_reject_agent(user_input: str, reject_reason: Optional[str]) -> str:
+    prompt = f"""
+User input:
+{user_input}
+
+Reject reason:
+{reject_reason or "not_homework_domain"}
+"""
+    result = await Runner.run(reject_agent, prompt)
+    return result.final_output
+
+
+async def run_profile_reply_agent(user_input: str, normalized_level: str) -> str:
+    prompt = f"""
+User input:
+{user_input}
+
+Normalized internal level:
+{describe_level(normalized_level)}
+"""
+    result = await Runner.run(profile_reply_agent, prompt)
+    return result.final_output
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
 
 def print_header() -> None:
-    print("Welcome to SmartTutor, your personal math, physics and chemistry homework tutor (plus history).")
-    print("What can I help you today?")
+    print("Welcome to SmartTutor.")
+    print("Ask me a math, physics, chemistry, or history question.")
     print("Type 'exit' or 'quit' to stop.")
+    print("Commands:")
+    print("  demo-history")
+    print("  demo-math")
+    print("  demo-life")
+    print("  demo-summary")
+    print("  demo-thanks")
+    print("  demo-hello")
+    print("  demo-profile")
     print()
-
-
-def build_history_text(history: List[dict], max_turns: int = 16) -> str:
-    if not history:
-        return "(empty conversation)"
-    recent = history[-max_turns:]
-    return "\n".join(f"{item['role'].upper()}: {item['content']}" for item in recent)
-
-
-def detect_response_language(text: str) -> str:
-    t = text.strip()
-
-    if re.search(r"[\u4e00-\u9fff]", t):
-        return "zh"
-
-    lower_t = f" {t.lower()} "
-    french_markers = [
-        " bonjour ", " merci ", " président ", " premier ", " première ",
-        " france ", " royaume ", " qui ", " été ", " le ", " la ", " de la ",
-        " devoir ", " mathématiques ", " histoire ", " quel ", " quelle ",
-        " comment ", " pourquoi ", " qu'"
-    ]
-    if any(marker in lower_t for marker in french_markers):
-        return "fr"
-
-    return "en"
-
-
-def looks_like_thanks(text: str) -> bool:
-    t = text.lower().strip()
-    phrases = [
-        "thanks",
-        "thank you",
-        "that's helpful",
-        "that is helpful",
-        "helpful, thank you",
-        "got it, thanks",
-        "ok thanks",
-        "okay thanks",
-        "thx",
-        "谢谢",
-        "多谢",
-        "merci",
-        "merci beaucoup",
-    ]
-    return any(p in t for p in phrases)
-
-
-def looks_like_summary_request(text: str) -> bool:
-    t = text.lower().strip()
-    keywords = [
-        "summarise",
-        "summarize",
-        "summary",
-        "recap",
-        "conversation so far",
-        "what have we discussed",
-        "what we've discussed",
-        "summarise our conversation",
-        "summarize our conversation",
-        "总结一下",
-        "总结我们目前的对话",
-        "总结一下我们聊了什么",
-        "résume",
-        "résumer",
-        "résumé",
-        "récapitule",
-    ]
-    return any(k in t for k in keywords)
-
-
-def smalltalk_reply(text: str) -> str:
-    lang = detect_response_language(text)
-    t = text.lower().strip()
-
-    if looks_like_thanks(t):
-        if lang == "zh":
-            return "不客气。"
-        if lang == "fr":
-            return "Je vous en prie."
-        return "You're welcome."
-
-    if t in {"hi", "hello", "hey", "你好", "您好", "bonjour", "salut"}:
-        if lang == "zh":
-            return "你好。你想让我帮你解答什么数学、物理、化学或历史作业问题？"
-        if lang == "fr":
-            return "Bonjour. Quelle question de devoir de mathématiques, de physique, de chimie ou d’histoire voulez-vous que j’explique ?"
-        return "Hello. What math, physics, chemistry, or history homework question would you like help with?"
-
-    if t in {"bye", "goodbye", "see you", "再见", "au revoir"}:
-        if lang == "zh":
-            return "再见。"
-        if lang == "fr":
-            return "Au revoir."
-        return "Goodbye."
-
-    if lang == "zh":
-        return "好的。"
-    if lang == "fr":
-        return "D’accord."
-    return "Okay."
-
-def summarize_for_reject(user_input: str, max_chars: int = 80) -> str:
-    """
-    A lightweight heuristic "summary" for guardrail refusals.
-    We intentionally keep it short and abstract (keyword-based), instead of copying
-    the beginning of the user's text verbatim.
-    """
-    t_raw = user_input.strip()
-    if not t_raw:
-        return ""
-
-    lang = detect_response_language(user_input)
-    t = " ".join(t_raw.split())
-    t_lower = t.lower()
-
-    def clip(s: str) -> str:
-        return s if len(s) <= max_chars else s[:max_chars] + "..."
-
-    # 1) Safety/obviously out-of-scope intents
-    if re.search(r"[\u4e00-\u9fff]", t):
-        if any(x in t_lower for x in ["爆炸", "火药", "武器", "炸弹", "杀", "开枪", "鞭炮", "烟花"]):
-            return clip("危险/有害请求")
-        if any(x in t_lower for x in ["旅行", "怎么去", "怎么走", "路线", "从", "到", "去伦敦", "去英国"]):
-            return clip("旅行规划请求")
-        if any(x in t_lower for x in ["出生", "生日", "哪年", "哪年建", "何时建", "第一任校长", "第一任院长", "建成", "修建"]):
-            return clip("历史事实查询类问题")
-    else:
-        if any(x in t_lower for x in ["firecracker", "firework", "bomb", "weapon", "kill", "gun", "explode"]):
-            return clip("a harmful/dangerous request")
-        if any(x in t_lower for x in ["travel", "trip", "how to get", "best way", "from", "to", "itinerary"]):
-            return clip("a travel-planning request")
-        if any(x in t_lower for x in ["birthday", "date of birth", "when was", "when was it built", "first president", "founded", "built"]):
-            return clip("a narrow history fact-lookup")
-
-    # 2) Abstract intent: action + domain
-    # Action verbs
-    if lang == "zh":
-        actions = [
-            ("计算", ["计算", "求", "算", "多少钱", "多少", "solve", "calculate"]),
-            ("解题/解方程", ["解", "解方程", "求解", "solve", "equation"]),
-            ("解释/说明", ["解释", "说明", "讲解", "理解", "explain", "what is"]),
-            ("配平", ["配平", "平衡化学方程", "balance", "balancing"]),
-            ("总结", ["总结", "总结一下", "recap", "summarise", "summarize"]),
-        ]
-        domain_phrases = [
-            ("数学", ["math", "mathematics", "algebra", "geometry", "equation", "theorem", "integral", "derivative", "sqrt"]),
-            ("物理", ["physics", "newton", "force", "velocity", "acceleration", "projectile", "circuit", "ohm", "wave", "optics", "thermo", "energy"]),
-            ("化学", ["chemistry", "chemical", "mole", "stoichiometry", "reaction", "ph", "acid", "base", "thermochemistry", "equation"]),
-            ("历史", ["history", "historical", "president", "emperor", "king", "revolution", "war", "dynasty", "date", "when was", "where"]),
-        ]
-    elif lang == "fr":
-        actions = [
-            ("calcul", ["calculer", "calcul", "résoudre", "find", "compute"]),
-            ("résolution", ["résoudre", "équation", "solve", "equation"]),
-            ("explication", ["expliquer", "description", "what is", "explain", "comment"]),
-            ("équilibrage", ["équilibrer", "balance", "balancer", "équation chimique"]),
-            ("résumé", ["résumer", "récapituler", "summary", "recap"]),
-        ]
-        domain_phrases = [
-            ("mathématiques", ["math", "algèbre", "geometry", "equation", "theorem", "intégrale", "dérivée", "sqrt"]),
-            ("physique", ["physique", "newton", "force", "vitesse", "accélération", "projectile", "circuit", "ohm", "onde", "optique", "thermo", "énergie"]),
-            ("chimie", ["chimie", "chimie", "mole", "stoichiometry", "réaction", "ph", "acide", "base", "thermochemistry", "équation"]),
-            ("histoire", ["histoire", "historique", "président", "empereur", "roi", "révolution", "guerre", "dynastie", "date", "quand", "où"]),
-        ]
-    else:
-        actions = [
-            ("computing", ["compute", "calculation", "calculate", "find", "how many"]),
-            ("solving", ["solve", "solution", "equation", "x+1", "x + 1"]),
-            ("explaining", ["explain", "what is", "how does", "why", "give an explanation"]),
-            ("balancing", ["balance", "balancing", "equation"]),
-            ("summarizing", ["summarize", "summarise", "recap", "summary", "conversation so far"]),
-        ]
-        domain_phrases = [
-            ("math", ["math", "mathematics", "algebra", "geometry", "equation", "theorem", "integral", "derivative", "sqrt"]),
-            ("physics", ["physics", "newton", "force", "velocity", "acceleration", "projectile", "circuit", "ohm", "wave", "optics", "thermo", "energy"]),
-            ("chemistry", ["chemistry", "chemical", "mole", "stoichiometry", "reaction", "ph", "acid", "base", "thermochemistry"]),
-            ("history", ["history", "historical", "president", "emperor", "king", "revolution", "war", "dynasty", "date", "when was", "where"]),
-        ]
-
-    action = ""
-    for a_label, keys in actions:
-        if any(k in t_lower for k in keys):
-            action = a_label
-            break
-
-    domain = ""
-    for d_label, keys in domain_phrases:
-        if any(k in t_lower for k in keys):
-            domain = d_label
-            break
-
-    # 3) History-style special case: fact lookup
-    if lang == "zh" and (any(k in t_lower for k in ["第一任", "出生", "生日", "哪年", "何时", "date of birth", "when was"]) and any(k in t_lower for k in ["总统", "皇帝", "总统", "总统", "president", "emperor", "king"])):
-        return clip("历史人物/事件的具体事实查询")
-    if lang != "zh" and (any(k in t_lower for k in ["first", "birthday", "date of birth", "when was"]) and any(k in t_lower for k in ["president", "emperor", "king", "dynasty"])):
-        return clip("a narrow history fact-lookup")
-
-    if action and domain:
-        if lang == "zh":
-            return clip(f"关于{domain}的{action}类问题")
-        if lang == "fr":
-            return clip(f"Une demande de {action} en {domain}.")
-        return clip(f"a {action} {domain} question")
-
-    # 4) Fallback: clip the most informative short fragment
-    if len(t) <= max_chars:
-        return t
-    if re.search(r"[\u4e00-\u9fff]", t):
-        return clip(t)
-    return clip(t)
-
-
-def build_reject_message(reject_reason: Optional[str], user_input: str) -> str:
-    lang = detect_response_language(user_input)
-    q_summary = summarize_for_reject(user_input)
-
-    extra_detail = {
-        "zh": {
-            "unsafe_or_inappropriate": "另外，它包含危险或不适当的请求。",
-            "history_trivia_not_homework": "另外，它更像狭窄的历史事实查询。",
-            "too_broad_or_ungrounded_history": "另外，题目过于宽泛且缺少明确学科背景。",
-        },
-        "en": {
-            "unsafe_or_inappropriate": "Also, it contains a dangerous or inappropriate request.",
-            "history_trivia_not_homework": "Also, it looks like a narrow fact lookup rather than homework tutoring.",
-            "too_broad_or_ungrounded_history": "Also, the question is too broad and lacks a clear homework context.",
-        },
-        "fr": {
-            "unsafe_or_inappropriate": "En plus, la demande est dangereuse ou inappropriée.",
-            "history_trivia_not_homework": "En plus, cela ressemble à une recherche factuelle étroite plutôt qu’à un devoir.",
-            "too_broad_or_ungrounded_history": "En plus, la question est trop large et manque de contexte clair pour un devoir.",
-        },
-    }
-
-    if lang == "zh":
-        base = f"我理解你在问：{q_summary}。由于这不是历史、数学、物理或化学作业问题，所以我不回答。"
-        detail = extra_detail["zh"].get(reject_reason, "")
-        return base + (f" {detail}" if detail else "")
-
-    if lang == "fr":
-        base = f"Je comprends que vous demandez : {q_summary}. Comme ce n’est pas une question de devoir d’histoire, de mathématiques, de physique ou de chimie, je ne peux pas y répondre."
-        detail = extra_detail["fr"].get(reject_reason, "")
-        return base + (f" {detail}" if detail else "")
-
-    base = f"I understand you're asking about: {q_summary}. Since this is not a history, math, physics, or chemistry homework question, I cannot answer it."
-    detail = extra_detail["en"].get(reject_reason, "")
-    return base + (f" {detail}" if detail else "")
-
-
-def looks_like_theoretical_math_question(text: str) -> bool:
-    t = text.lower().strip()
-
-    theory_terms = [
-        "peano arithmetic", "number theory", "set theory", "logic", "proof",
-        "axiom", "axiomatic", "induction", "abstract algebra", "group theory",
-        "ring", "field", "topology", "combinatorics", "discrete math",
-        "数理逻辑", "公理", "公理化", "证明", "归纳法", "群论", "环", "域",
-        "拓扑", "组合数学", "离散数学", "皮亚诺", "皮亚诺算术",
-        "arithmétique de peano", "théorie des nombres", "théorie des ensembles",
-        "logique", "preuve", "axiome", "algèbre abstraite", "théorie des groupes",
-        "anneau", "corps", "topologie", "combinatoire", "mathématiques discrètes"
-    ]
-
-    return any(x in t for x in theory_terms)
-
-
-def looks_like_foundational_history_question(text: str) -> bool:
-    t = text.lower().strip()
-
-    major_entity_terms = [
-        "france", "french", "england", "britain", "united kingdom",
-        "china", "chinese", "rome", "roman", "qing dynasty", "ming dynasty",
-        "清朝", "明朝", "法国", "英国", "中国", "罗马", "秦朝", "汉朝", "唐朝", "宋朝",
-        "royaume-uni", "chine"
-    ]
-
-    major_role_terms = [
-        "president", "emperor", "king", "queen", "prime minister", "monarch",
-        "总统", "皇帝", "国王", "女王", "首相", "君主",
-        "président", "empereur", "roi", "reine", "premier ministre", "monarque"
-    ]
-
-    major_event_terms = [
-        "revolution", "war", "dynasty", "empire", "republic",
-        "革命", "战争", "王朝", "帝国", "共和国",
-        "révolution", "guerre", "dynastie", "empire", "république"
-    ]
-
-    has_major_entity = any(x in t for x in major_entity_terms)
-    has_major_role = any(x in t for x in major_role_terms)
-    has_major_event = any(x in t for x in major_event_terms)
-
-    return (has_major_entity and has_major_role) or has_major_event
-
-
-def looks_like_history_trivia_not_homework(text: str) -> bool:
-    t = text.lower().strip()
-
-    institution_terms = [
-        "university", "college", "school", "library", "campus",
-        "department", "institute", "hkust", "tsinghua",
-        "hong kong university of science and technology",
-        "清华大学", "香港科技大学", "图书馆", "学院", "学校", "大学", "校园", "系",
-        "université", "bibliothèque", "campus", "département", "institut"
-    ]
-
-    trivia_terms = [
-        "first president", "first principal", "first dean", "first head",
-        "founding president", "birthday", "date of birth",
-        "when was it built", "when was it founded",
-        "第一任校长", "生日", "哪年修建", "哪年建成", "哪年建的", "什么时候建",
-        "第一任院长", "第一任负责人", "第一任馆长",
-        "premier président", "premier doyen", "date de naissance",
-        "quand a-t-il été construit", "quand a-t-il été fondé"
-    ]
-
-    analysis_terms = [
-        "why", "how", "analyze", "analyse", "compare", "evaluation", "significance",
-        "为什么", "如何", "分析", "比较", "评价", "意义", "影响", "原因", "后果",
-        "pourquoi", "comment", "analyser", "comparer", "importance", "signification"
-    ]
-
-    has_institution = any(x in t for x in institution_terms)
-    has_trivia = any(x in t for x in trivia_terms)
-    has_analysis = any(x in t for x in analysis_terms)
-
-    return has_institution and has_trivia and not has_analysis
-
-
-def looks_like_too_broad_nonhomework_history(text: str) -> bool:
-    t = text.lower().strip()
-
-    broad_topic_terms = [
-        "娱乐圈", "演艺圈", "影视圈", "明星圈",
-        "人类", "社会", "流行文化", "娱乐产业", "文化产业",
-        "humanity", "humankind", "mankind", "entertainment industry",
-        "pop culture", "society",
-        "industrie du divertissement", "culture populaire", "société", "humanité"
-    ]
-
-    development_terms = [
-        "怎么发展", "如何发展", "是怎么发展的", "发展过程", "如何形成",
-        "how did it develop", "how has it developed", "development of",
-        "comment cela s’est développé", "comment s’est développé", "développement de"
-    ]
-
-    grounding_terms = [
-        "france", "china", "uk", "united kingdom", "rome",
-        "法国", "中国", "英国", "罗马",
-        "清朝", "明朝", "唐朝", "宋朝",
-        "工业革命", "辛亥革命", "法国大革命", "鸦片战争",
-        "19th century", "20th century", "19世纪", "20世纪",
-        "war", "revolution", "dynasty", "empire",
-        "战争", "革命", "王朝", "帝国", "圆明园", "故宫",
-        "19e siècle", "20e siècle", "guerre", "révolution", "dynastie", "empire"
-    ]
-
-    has_broad_topic = any(x in t for x in broad_topic_terms)
-    has_development = any(x in t for x in development_terms)
-    has_grounding = any(x in t for x in grounding_terms)
-
-    return has_broad_topic and has_development and not has_grounding
 
 
 async def main() -> None:
@@ -784,51 +538,15 @@ async def main() -> None:
             print("Exiting chat.")
             break
 
+        if user_input.lower() in DEMOS:
+            user_input = DEMOS[user_input.lower()]
+            print(f"[INFO] Running demo: {user_input}")
+
         history.append({"role": "user", "content": user_input})
 
         try:
-            if looks_like_thanks(user_input):
-                answer = smalltalk_reply(user_input)
-                print(f"Assistant: {answer}\n")
-                history.append({"role": "assistant", "content": answer})
-                continue
-
-            if looks_like_theoretical_math_question(user_input):
-                math_prompt = f"""
-User level: {describe_level(profile.level)}
-
-Question:
-{user_input}
-"""
-                result = await Runner.run(math_tutor_agent, math_prompt)
-                answer = result.final_output
-                print(f"Assistant: {answer}\n")
-                history.append({"role": "assistant", "content": answer})
-                continue
-
-            if looks_like_too_broad_nonhomework_history(user_input):
-                answer = build_reject_message("too_broad_or_ungrounded_history", user_input)
-                print(f"Assistant: {answer}\n")
-                history.append({"role": "assistant", "content": answer})
-                continue
-
-            if looks_like_history_trivia_not_homework(user_input) and not looks_like_foundational_history_question(user_input):
-                answer = build_reject_message("history_trivia_not_homework", user_input)
-                print(f"Assistant: {answer}\n")
-                history.append({"role": "assistant", "content": answer})
-                continue
-
-            forced_summary = looks_like_summary_request(user_input)
-
-            if forced_summary:
-                decision = RouteDecision(
-                    route="summary",
-                    reason="Explicit summary request matched by local rule.",
-                    confidence="high",
-                )
-            else:
-                route_result = await Runner.run(router_agent, user_input)
-                decision = route_result.final_output_as(RouteDecision)
+            route_result = await Runner.run(router_agent, user_input)
+            decision = route_result.final_output_as(RouteDecision)
 
             if DEBUG:
                 print(
@@ -840,20 +558,13 @@ Question:
                 )
 
             if decision.route == "profile":
-                lang = detect_response_language(user_input)
                 raw_level = decision.extracted_level or user_input
                 profile.level = normalize_level(raw_level)
-
-                if lang == "zh":
-                    answer = f"明白了。接下来我会按照这个水平来调整回答：{describe_level(profile.level)}。"
-                elif lang == "fr":
-                    answer = f"Compris. J’adapterai désormais mes réponses à ce niveau : {describe_level(profile.level)}."
-                else:
-                    answer = f"Understood. I will tailor future answers to this level: {describe_level(profile.level)}."
+                answer = await run_profile_reply_agent(user_input, profile.level)
 
             elif decision.route == "summary":
                 prompt = f"""
-Current user level: {describe_level(profile.level)}
+Current internal user level: {describe_level(profile.level)}
 
 Conversation:
 {build_history_text(history)}
@@ -862,146 +573,30 @@ Conversation:
                 answer = result.final_output
 
             elif decision.route == "smalltalk":
-                answer = smalltalk_reply(user_input)
-
-            elif decision.route == "math":
-                math_prompt = f"""
-User level: {describe_level(profile.level)}
-
-Question:
-{user_input}
-"""
-                result = await Runner.run(math_tutor_agent, math_prompt)
-                answer = result.final_output
-
-            elif decision.route == "physics":
-                physics_prompt = f"""
-User level: {describe_level(profile.level)}
-
-Question:
-{user_input}
-"""
-                result = await Runner.run(physics_tutor_agent, physics_prompt)
-                answer = result.final_output
-
-            elif decision.route == "chemistry":
-                chemistry_prompt = f"""
-User level: {describe_level(profile.level)}
-
-Question:
-{user_input}
-"""
-                result = await Runner.run(chemistry_tutor_agent, chemistry_prompt)
-                answer = result.final_output
+                answer = await run_smalltalk_agent(user_input)
 
             elif decision.route == "history":
-                if looks_like_too_broad_nonhomework_history(user_input):
-                    answer = build_reject_message("too_broad_or_ungrounded_history", user_input)
-                elif looks_like_history_trivia_not_homework(user_input) and not looks_like_foundational_history_question(user_input):
-                    answer = build_reject_message("history_trivia_not_homework", user_input)
-                else:
-                    history_prompt = f"""
-User level: {describe_level(profile.level)}
+                scope_result = await Runner.run(history_scope_agent, user_input)
+                scope_decision = scope_result.final_output_as(HistoryScopeDecision)
 
-Question:
-{user_input}
-"""
-                    result = await Runner.run(history_tutor_agent, history_prompt)
-                    answer = result.final_output
+                if DEBUG:
+                    print(
+                        f"[HISTORY_SCOPE] allowed={scope_decision.allowed} | "
+                        f"confidence={scope_decision.confidence} | "
+                        f"reject_reason={scope_decision.reject_reason} | "
+                        f"reason={scope_decision.reason}"
+                    )
+
+                if not scope_decision.allowed:
+                    answer = await run_reject_agent(user_input, scope_decision.reject_reason)
+                else:
+                    answer = await run_subject_agent("history", profile, user_input)
+
+            elif decision.route in {"math", "physics", "chemistry"}:
+                answer = await run_subject_agent(decision.route, profile, user_input)
 
             else:
-                if decision.confidence == "low":
-                    # Router was uncertain and chose `reject`. Try each tutor in turn
-                    # to recover legitimate homework questions.
-                    answer = None
-
-                    # 1) Math
-                    math_fallback_prompt = f"""
-User level: {describe_level(profile.level)}
-
-Question:
-{user_input}
-
-If this looks like a valid math tutoring question, answer it as math help.
-If it clearly does not belong to math tutoring, reply exactly with:
-__REJECT__
-"""
-                    math_fallback_result = await Runner.run(
-                        math_tutor_agent, math_fallback_prompt
-                    )
-                    math_fallback_answer = str(
-                        math_fallback_result.final_output
-                    ).strip()
-                    if math_fallback_answer != "__REJECT__":
-                        answer = math_fallback_answer
-
-                    # 2) Physics
-                    if answer is None:
-                        physics_fallback_prompt = f"""
-User level: {describe_level(profile.level)}
-
-Question:
-{user_input}
-
-If this looks like a valid physics tutoring question, answer it as physics help.
-If it clearly does not belong to physics tutoring, reply exactly with:
-__REJECT__
-"""
-                        physics_fallback_result = await Runner.run(
-                            physics_tutor_agent, physics_fallback_prompt
-                        )
-                        physics_fallback_answer = str(
-                            physics_fallback_result.final_output
-                        ).strip()
-                        if physics_fallback_answer != "__REJECT__":
-                            answer = physics_fallback_answer
-
-                    # 3) Chemistry
-                    if answer is None:
-                        chemistry_fallback_prompt = f"""
-User level: {describe_level(profile.level)}
-
-Question:
-{user_input}
-
-If this looks like a valid chemistry tutoring question, answer it as chemistry help.
-If it clearly does not belong to chemistry tutoring, reply exactly with:
-__REJECT__
-"""
-                        chemistry_fallback_result = await Runner.run(
-                            chemistry_tutor_agent, chemistry_fallback_prompt
-                        )
-                        chemistry_fallback_answer = str(
-                            chemistry_fallback_result.final_output
-                        ).strip()
-                        if chemistry_fallback_answer != "__REJECT__":
-                            answer = chemistry_fallback_answer
-
-                    # 4) History
-                    if answer is None:
-                        history_fallback_prompt = f"""
-User level: {describe_level(profile.level)}
-
-Question:
-{user_input}
-
-If this looks like a valid history tutoring question, answer it as history help.
-If it clearly does not belong to history tutoring, reply exactly with:
-__REJECT__
-"""
-                        history_fallback_result = await Runner.run(
-                            history_tutor_agent, history_fallback_prompt
-                        )
-                        history_fallback_answer = str(
-                            history_fallback_result.final_output
-                        ).strip()
-                        if history_fallback_answer != "__REJECT__":
-                            answer = history_fallback_answer
-
-                    if answer is None:
-                        answer = build_reject_message(decision.reject_reason, user_input)
-                else:
-                    answer = build_reject_message(decision.reject_reason, user_input)
+                answer = await run_reject_agent(user_input, decision.reject_reason)
 
             print(f"Assistant: {answer}\n")
             history.append({"role": "assistant", "content": answer})
