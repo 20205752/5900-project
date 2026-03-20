@@ -1,7 +1,7 @@
 import asyncio
 import os
 import re
-from typing import Dict, List, Literal, Optional
+from typing import List, Literal, Optional
 
 from agents import (
     Agent,
@@ -20,28 +20,6 @@ AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
 AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY", "")
 
 DEBUG = False
-
-DEMOS: Dict[str, str] = {
-    "demo-profile": "I'm a university year one student, provide your answers accordingly.",
-    "demo-math": "How to solve x + 1 = 2 for x?",
-    "demo-history": "Who was the first president of France?",
-    "demo-distance": "I want to know how to compute the distance between two cities like Hong Kong and Shenzhen.",
-    "demo-center": "How do I find the centre of a city?",
-    "demo-peano": "Can you explain Peano arithmetic?",
-    "demo-practice": "I want to practice calculus for my final in math101, can you give me a few exercises?",
-    "demo-summary": "Can you summarise our conversation so far?",
-    "demo-reject1": "What is the best way to travel from Hong Kong to London?",
-    "demo-reject2": "What would happen if someone throws a firecracker on a busy street?",
-    "demo-thanks": "That's helpful, thank you.",
-    "demo-false-premise": "the first president of the United Kindom",
-    "demo-queen": "the first queen of the United Kindom",
-    "demo-trivia1": "清华大学的第一任校长",
-    "demo-trivia2": "清华大学第一任校长的生日是什么时候",
-    "demo-trivia3": "香港科技大学图书馆是哪年修建的",
-    "demo-valid-history-cn": "圆明园是哪年修建的",
-    "demo-valid-history-analysis": "辛亥革命对中国政治发展有什么影响？",
-    "demo-valid-history-compare": "比较明朝与清朝中央集权制度的差异。",
-}
 
 
 def build_azure_model() -> OpenAIChatCompletionsModel:
@@ -142,12 +120,16 @@ Important:
    - the first president/dean/head of a specific university
    - the construction year of a local campus building or library
    - local administrative or institutional trivia with little broader historical significance
-9. Reject travel planning questions such as:
+9. Foundational fact questions about major countries, major political leaders,
+   dynasties, wars, revolutions, or historically significant states are valid history homework,
+   even if they are short factual questions.
+10. Example: "Who was the first president of France?" should be accepted.
+11. Reject travel planning questions such as:
    "What is the best way to travel from Hong Kong to London?"
-10. Reject harmful or dangerous requests.
-11. If the user says something like "I'm a university year one student", use route="profile"
+12. Reject harmful or dangerous requests.
+13. If the user says something like "I'm a university year one student", use route="profile"
    and extract a short user_level.
-12. Set confidence:
+14. Set confidence:
    - high: the route is very clear
    - medium: probably correct
    - low: ambiguous case
@@ -215,6 +197,9 @@ Scope rules:
   2. asks for cause, effect, comparison, significance, evaluation, or interpretation
   3. concerns historically significant people, states, dynasties, wars, revolutions, or sites
   4. has clear educational value beyond a narrow factual lookup
+- Foundational fact questions about major countries, major political leaders,
+  dynasties, wars, revolutions, or historically significant states should still be answered,
+  even if they are short factual questions.
 - If the question contains a false or impossible premise, do not force an answer.
   Instead, politely correct the premise and answer the closest valid interpretation if possible.
 - If a question is only a narrow fact lookup with little educational value,
@@ -253,13 +238,10 @@ def print_header() -> None:
     print("Welcome to SmartTutor, your personal math and history homework tutor.")
     print("What can I help you today?")
     print("Type 'exit' or 'quit' to stop.")
-    print("Demo commands:")
-    for key in DEMOS:
-        print(f"  {key}")
     print()
 
 
-def build_history_text(history: List[Dict[str, str]], max_turns: int = 16) -> str:
+def build_history_text(history: List[dict], max_turns: int = 16) -> str:
     if not history:
         return "(empty conversation)"
     recent = history[-max_turns:]
@@ -333,33 +315,33 @@ def build_reject_message(reject_reason: Optional[str]) -> str:
     )
 
 
-def looks_like_history_homework(text: str) -> bool:
+def looks_like_foundational_history_question(text: str) -> bool:
     t = text.lower().strip()
 
-    significant_history_terms = [
-        "war", "revolution", "dynasty", "empire", "monarchy", "republic",
-        "president of france", "industrial revolution",
-        "圆明园", "故宫", "辛亥革命", "清朝", "明朝", "唐朝", "宋朝", "元朝",
-        "法国大革命", "鸦片战争", "秦朝", "汉朝", "王朝", "革命", "战争", "朝代",
-        "帝国", "共和国", "君主制"
+    major_entity_terms = [
+        "france", "french", "england", "britain", "united kingdom",
+        "china", "chinese", "rome", "roman", "qing dynasty", "ming dynasty",
+        "清朝", "明朝", "法国", "英国", "中国", "罗马", "秦朝", "汉朝", "唐朝", "宋朝",
+        "royaume-uni", "chine"
     ]
 
-    analysis_terms = [
-        "why", "how", "analyze", "analyse", "compare", "evaluation", "significance",
-        "cause", "effect", "impact", "influence",
-        "为什么", "如何", "分析", "比较", "评价", "意义", "影响", "原因", "后果"
+    major_role_terms = [
+        "president", "emperor", "king", "queen", "prime minister", "monarch",
+        "总统", "皇帝", "国王", "女王", "首相", "君主",
+        "président", "empereur", "roi", "reine", "premier ministre", "monarque"
     ]
 
-    history_question_starters = [
-        "who was", "when did", "why did", "how did",
-        "是谁", "哪一年", "哪年", "为什么", "如何"
+    major_event_terms = [
+        "revolution", "war", "dynasty", "empire", "republic",
+        "革命", "战争", "王朝", "帝国", "共和国",
+        "révolution", "guerre", "dynastie", "empire", "république"
     ]
 
-    has_significant_topic = any(x in t for x in significant_history_terms)
-    has_analysis = any(x in t for x in analysis_terms)
-    has_history_form = any(x in t for x in history_question_starters)
+    has_major_entity = any(x in t for x in major_entity_terms)
+    has_major_role = any(x in t for x in major_role_terms)
+    has_major_event = any(x in t for x in major_event_terms)
 
-    return has_significant_topic or (has_history_form and has_analysis)
+    return (has_major_entity and has_major_role) or has_major_event
 
 
 def looks_like_history_trivia_not_homework(text: str) -> bool:
@@ -397,7 +379,7 @@ async def main() -> None:
     print_header()
 
     profile = UserProfile()
-    history: List[Dict[str, str]] = []
+    history: List[dict] = []
 
     while True:
         user_input = input("User: ").strip()
@@ -408,10 +390,6 @@ async def main() -> None:
             print("Exiting chat.")
             break
 
-        if user_input.lower() in DEMOS:
-            user_input = DEMOS[user_input.lower()]
-            print(f"[INFO] Running demo: {user_input}")
-
         history.append({"role": "user", "content": user_input})
 
         try:
@@ -421,7 +399,7 @@ async def main() -> None:
                 history.append({"role": "assistant", "content": answer})
                 continue
 
-            if looks_like_history_trivia_not_homework(user_input):
+            if looks_like_history_trivia_not_homework(user_input) and not looks_like_foundational_history_question(user_input):
                 answer = build_reject_message("history_trivia_not_homework")
                 print(f"Assistant: {answer}\n")
                 history.append({"role": "assistant", "content": answer})
@@ -478,8 +456,7 @@ Question:
                 answer = result.final_output
 
             elif decision.route == "history":
-                # 再做一次学科特征校验，防止把窄 trivia 放进 history
-                if looks_like_history_trivia_not_homework(user_input):
+                if looks_like_history_trivia_not_homework(user_input) and not looks_like_foundational_history_question(user_input):
                     answer = build_reject_message("history_trivia_not_homework")
                 else:
                     history_prompt = f"""
