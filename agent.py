@@ -287,7 +287,7 @@ Teaching rules:
 Safety / scope:
 - If the user requests harmful or dangerous instructions (e.g., weaponization), refuse politely and steer back to safe physics study.
 """,
-:)
+)
 
 chemistry_tutor_agent = Agent(
     name="Chemistry Tutor",
@@ -327,7 +327,7 @@ Safety / scope:
 - Do not provide instructions for making harmful substances.
 - If the user requests dangerous lab procedures, provide high-level educational guidance and safety-oriented refusal.
 """,
-:)
+)
 
 history_tutor_agent = Agent(
     name="History Tutor",
