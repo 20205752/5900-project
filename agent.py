@@ -505,39 +505,152 @@ def smalltalk_reply(text: str) -> str:
         return "D’accord."
     return "Okay."
 
+def summarize_for_reject(user_input: str, max_chars: int = 80) -> str:
+    """
+    A lightweight heuristic "summary" for guardrail refusals.
+    We intentionally keep it short and abstract (keyword-based), instead of copying
+    the beginning of the user's text verbatim.
+    """
+    t_raw = user_input.strip()
+    if not t_raw:
+        return ""
+
+    lang = detect_response_language(user_input)
+    t = " ".join(t_raw.split())
+    t_lower = t.lower()
+
+    def clip(s: str) -> str:
+        return s if len(s) <= max_chars else s[:max_chars] + "..."
+
+    # 1) Safety/obviously out-of-scope intents
+    if re.search(r"[\u4e00-\u9fff]", t):
+        if any(x in t_lower for x in ["爆炸", "火药", "武器", "炸弹", "杀", "开枪", "鞭炮", "烟花"]):
+            return clip("危险/有害请求")
+        if any(x in t_lower for x in ["旅行", "怎么去", "怎么走", "路线", "从", "到", "去伦敦", "去英国"]):
+            return clip("旅行规划请求")
+        if any(x in t_lower for x in ["出生", "生日", "哪年", "哪年建", "何时建", "第一任校长", "第一任院长", "建成", "修建"]):
+            return clip("历史事实查询类问题")
+    else:
+        if any(x in t_lower for x in ["firecracker", "firework", "bomb", "weapon", "kill", "gun", "explode"]):
+            return clip("a harmful/dangerous request")
+        if any(x in t_lower for x in ["travel", "trip", "how to get", "best way", "from", "to", "itinerary"]):
+            return clip("a travel-planning request")
+        if any(x in t_lower for x in ["birthday", "date of birth", "when was", "when was it built", "first president", "founded", "built"]):
+            return clip("a narrow history fact-lookup")
+
+    # 2) Abstract intent: action + domain
+    # Action verbs
+    if lang == "zh":
+        actions = [
+            ("计算", ["计算", "求", "算", "多少钱", "多少", "solve", "calculate"]),
+            ("解题/解方程", ["解", "解方程", "求解", "solve", "equation"]),
+            ("解释/说明", ["解释", "说明", "讲解", "理解", "explain", "what is"]),
+            ("配平", ["配平", "平衡化学方程", "balance", "balancing"]),
+            ("总结", ["总结", "总结一下", "recap", "summarise", "summarize"]),
+        ]
+        domain_phrases = [
+            ("数学", ["math", "mathematics", "algebra", "geometry", "equation", "theorem", "integral", "derivative", "sqrt"]),
+            ("物理", ["physics", "newton", "force", "velocity", "acceleration", "projectile", "circuit", "ohm", "wave", "optics", "thermo", "energy"]),
+            ("化学", ["chemistry", "chemical", "mole", "stoichiometry", "reaction", "ph", "acid", "base", "thermochemistry", "equation"]),
+            ("历史", ["history", "historical", "president", "emperor", "king", "revolution", "war", "dynasty", "date", "when was", "where"]),
+        ]
+    elif lang == "fr":
+        actions = [
+            ("calcul", ["calculer", "calcul", "résoudre", "find", "compute"]),
+            ("résolution", ["résoudre", "équation", "solve", "equation"]),
+            ("explication", ["expliquer", "description", "what is", "explain", "comment"]),
+            ("équilibrage", ["équilibrer", "balance", "balancer", "équation chimique"]),
+            ("résumé", ["résumer", "récapituler", "summary", "recap"]),
+        ]
+        domain_phrases = [
+            ("mathématiques", ["math", "algèbre", "geometry", "equation", "theorem", "intégrale", "dérivée", "sqrt"]),
+            ("physique", ["physique", "newton", "force", "vitesse", "accélération", "projectile", "circuit", "ohm", "onde", "optique", "thermo", "énergie"]),
+            ("chimie", ["chimie", "chimie", "mole", "stoichiometry", "réaction", "ph", "acide", "base", "thermochemistry", "équation"]),
+            ("histoire", ["histoire", "historique", "président", "empereur", "roi", "révolution", "guerre", "dynastie", "date", "quand", "où"]),
+        ]
+    else:
+        actions = [
+            ("computing", ["compute", "calculation", "calculate", "find", "how many"]),
+            ("solving", ["solve", "solution", "equation", "x+1", "x + 1"]),
+            ("explaining", ["explain", "what is", "how does", "why", "give an explanation"]),
+            ("balancing", ["balance", "balancing", "equation"]),
+            ("summarizing", ["summarize", "summarise", "recap", "summary", "conversation so far"]),
+        ]
+        domain_phrases = [
+            ("math", ["math", "mathematics", "algebra", "geometry", "equation", "theorem", "integral", "derivative", "sqrt"]),
+            ("physics", ["physics", "newton", "force", "velocity", "acceleration", "projectile", "circuit", "ohm", "wave", "optics", "thermo", "energy"]),
+            ("chemistry", ["chemistry", "chemical", "mole", "stoichiometry", "reaction", "ph", "acid", "base", "thermochemistry"]),
+            ("history", ["history", "historical", "president", "emperor", "king", "revolution", "war", "dynasty", "date", "when was", "where"]),
+        ]
+
+    action = ""
+    for a_label, keys in actions:
+        if any(k in t_lower for k in keys):
+            action = a_label
+            break
+
+    domain = ""
+    for d_label, keys in domain_phrases:
+        if any(k in t_lower for k in keys):
+            domain = d_label
+            break
+
+    # 3) History-style special case: fact lookup
+    if lang == "zh" and (any(k in t_lower for k in ["第一任", "出生", "生日", "哪年", "何时", "date of birth", "when was"]) and any(k in t_lower for k in ["总统", "皇帝", "总统", "总统", "president", "emperor", "king"])):
+        return clip("历史人物/事件的具体事实查询")
+    if lang != "zh" and (any(k in t_lower for k in ["first", "birthday", "date of birth", "when was"]) and any(k in t_lower for k in ["president", "emperor", "king", "dynasty"])):
+        return clip("a narrow history fact-lookup")
+
+    if action and domain:
+        if lang == "zh":
+            return clip(f"关于{domain}的{action}类问题")
+        if lang == "fr":
+            return clip(f"Une demande de {action} en {domain}.")
+        return clip(f"a {action} {domain} question")
+
+    # 4) Fallback: clip the most informative short fragment
+    if len(t) <= max_chars:
+        return t
+    if re.search(r"[\u4e00-\u9fff]", t):
+        return clip(t)
+    return clip(t)
+
 
 def build_reject_message(reject_reason: Optional[str], user_input: str) -> str:
     lang = detect_response_language(user_input)
+    q_summary = summarize_for_reject(user_input)
 
-    reason_map = {
+    extra_detail = {
         "zh": {
-            "not_homework_domain": "这是一个不属于数学、物理、化学或历史作业范畴的问题，所以我不能回答。",
-            "unsafe_or_inappropriate": "这是一个危险或不适当的问题，不属于数学、物理、化学或历史作业的正常辅导范围，所以我不能回答。",
-            "history_trivia_not_homework": "这是一个狭窄的历史事实查询问题，而不是典型的历史作业问题，所以我不能回答。",
-            "too_broad_or_ungrounded_history": "这是一个过于宽泛、缺少明确学科背景的问题，不属于具体的数学、物理、化学或历史作业问题，所以我不能回答。",
+            "unsafe_or_inappropriate": "另外，它包含危险或不适当的请求。",
+            "history_trivia_not_homework": "另外，它更像狭窄的历史事实查询。",
+            "too_broad_or_ungrounded_history": "另外，题目过于宽泛且缺少明确学科背景。",
         },
         "en": {
-            "not_homework_domain": "This is not a math, physics, chemistry, or history homework question, so I cannot answer it.",
-            "unsafe_or_inappropriate": "This is a dangerous or inappropriate question, and it does not belong to normal math/physics/chemistry/history homework tutoring, so I cannot answer it.",
-            "history_trivia_not_homework": "This is a narrow historical fact-lookup question rather than a typical history homework question, so I cannot answer it.",
-            "too_broad_or_ungrounded_history": "This question is too broad and does not have a clear math/physics/chemistry/history homework context, so I cannot answer it.",
+            "unsafe_or_inappropriate": "Also, it contains a dangerous or inappropriate request.",
+            "history_trivia_not_homework": "Also, it looks like a narrow fact lookup rather than homework tutoring.",
+            "too_broad_or_ungrounded_history": "Also, the question is too broad and lacks a clear homework context.",
         },
         "fr": {
-            "not_homework_domain": "Ce n’est pas une question de devoir de mathématiques, de physique, de chimie ou d’histoire, donc je ne peux pas y répondre.",
-            "unsafe_or_inappropriate": "C’est une question dangereuse ou inappropriée, qui ne relève pas d’un accompagnement normal en devoirs de mathématiques, de physique, de chimie ou d’histoire, donc je ne peux pas y répondre.",
-            "history_trivia_not_homework": "C’est une question de fait historique très étroite, et non une question typique de devoir d’histoire, donc je ne peux pas y répondre.",
-            "too_broad_or_ungrounded_history": "Cette question est trop large et n’a pas de contexte clair de devoir de mathématiques, de physique, de chimie ou d’histoire, donc je ne peux pas y répondre.",
+            "unsafe_or_inappropriate": "En plus, la demande est dangereuse ou inappropriée.",
+            "history_trivia_not_homework": "En plus, cela ressemble à une recherche factuelle étroite plutôt qu’à un devoir.",
+            "too_broad_or_ungrounded_history": "En plus, la question est trop large et manque de contexte clair pour un devoir.",
         },
     }
 
-    fallback_map = {
-        "zh": "这个问题不属于数学、物理、化学或历史作业的范畴，所以我不能回答。",
-        "en": "This question does not fall within math/physics/chemistry/history homework tutoring, so I cannot answer it.",
-        "fr": "Cette question ne relève pas d’un devoir de mathématiques, de physique, de chimie ou d’histoire, donc je ne peux pas y répondre.",
-    }
+    if lang == "zh":
+        base = f"我理解你在问：{q_summary}。由于这不是历史、数学、物理或化学作业问题，所以我不回答。"
+        detail = extra_detail["zh"].get(reject_reason, "")
+        return base + (f" {detail}" if detail else "")
 
-    lang_map = reason_map.get(lang, reason_map["en"])
-    return lang_map.get(reject_reason, fallback_map.get(lang, fallback_map["en"]))
+    if lang == "fr":
+        base = f"Je comprends que vous demandez : {q_summary}. Comme ce n’est pas une question de devoir d’histoire, de mathématiques, de physique ou de chimie, je ne peux pas y répondre."
+        detail = extra_detail["fr"].get(reject_reason, "")
+        return base + (f" {detail}" if detail else "")
+
+    base = f"I understand you're asking about: {q_summary}. Since this is not a history, math, physics, or chemistry homework question, I cannot answer it."
+    detail = extra_detail["en"].get(reject_reason, "")
+    return base + (f" {detail}" if detail else "")
 
 
 def looks_like_theoretical_math_question(text: str) -> bool:
