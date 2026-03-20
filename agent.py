@@ -114,22 +114,24 @@ Important:
    - involving historically significant events, states, dynasties, governments,
      wars, revolutions, social change, famous sites, or major historical figures
    - resembling a teachable classroom question rather than a trivia lookup
-8. Reject narrow historical trivia that looks like a fact lookup rather than homework tutoring.
-   Examples include:
-   - birthdays of niche institutional figures
-   - the first president/dean/head of a specific university
-   - the construction year of a local campus building or library
-   - local administrative or institutional trivia with little broader historical significance
-9. Foundational fact questions about major countries, major political leaders,
+8. Foundational fact questions about major countries, major political leaders,
    dynasties, wars, revolutions, or historically significant states are valid history homework,
    even if they are short factual questions.
-10. Example: "Who was the first president of France?" should be accepted.
-11. Reject travel planning questions such as:
-   "What is the best way to travel from Hong Kong to London?"
-12. Reject harmful or dangerous requests.
-13. If the user says something like "I'm a university year one student", use route="profile"
-   and extract a short user_level.
-14. Set confidence:
+9. Example: "Who was the first president of France?" should be accepted.
+10. Reject narrow historical trivia that looks like a fact lookup rather than homework tutoring.
+    Examples include:
+    - birthdays of niche institutional figures
+    - the first president/dean/head of a specific university
+    - the construction year of a local campus building or library
+    - local administrative or institutional trivia with little broader historical significance
+11. Reject questions that are too broad, vague, or weakly grounded historically.
+    Examples include broad social or entertainment topics without a clear time/place/course context.
+12. Reject travel planning questions such as:
+    "What is the best way to travel from Hong Kong to London?"
+13. Reject harmful or dangerous requests.
+14. If the user says something like "I'm a university year one student", use route="profile"
+    and extract a short user_level.
+15. Set confidence:
    - high: the route is very clear
    - medium: probably correct
    - low: ambiguous case
@@ -138,6 +140,7 @@ When rejecting, provide one reject_reason from:
 - not_homework_domain
 - unsafe_or_inappropriate
 - history_trivia_not_homework
+- too_broad_or_ungrounded_history
 """,
 )
 
@@ -204,6 +207,8 @@ Scope rules:
   Instead, politely correct the premise and answer the closest valid interpretation if possible.
 - If a question is only a narrow fact lookup with little educational value,
   especially about a school, library, campus building, department, or local institution,
+  politely refuse it as outside the intended homework-tutoring scope.
+- If a question is too broad, vague, or weakly grounded historically,
   politely refuse it as outside the intended homework-tutoring scope.
 - If a question is about leadership or founding roles of a specific university or local institution,
   politely refuse it as not suitable general history homework.
@@ -308,6 +313,9 @@ def build_reject_message(reject_reason: Optional[str]) -> str:
         "history_trivia_not_homework": (
             "Sorry, that looks more like a narrow factual lookup than a suitable math or history homework question."
         ),
+        "too_broad_or_ungrounded_history": (
+            "Sorry, that question is too broad or not historically grounded enough to look like a specific math or history homework question."
+        ),
     }
     return reason_map.get(
         reject_reason,
@@ -374,6 +382,38 @@ def looks_like_history_trivia_not_homework(text: str) -> bool:
     return has_institution and has_trivia and not has_analysis
 
 
+def looks_like_too_broad_nonhomework_history(text: str) -> bool:
+    t = text.lower().strip()
+
+    broad_topic_terms = [
+        "娱乐圈", "演艺圈", "影视圈", "明星圈",
+        "人类", "社会", "流行文化", "娱乐产业", "文化产业",
+        "humanity", "humankind", "mankind", "entertainment industry",
+        "pop culture", "society"
+    ]
+
+    development_terms = [
+        "怎么发展", "如何发展", "是怎么发展的", "发展过程", "如何形成",
+        "how did it develop", "how has it developed", "development of", "how did ... develop"
+    ]
+
+    grounding_terms = [
+        "france", "china", "uk", "united kingdom", "rome",
+        "法国", "中国", "英国", "罗马",
+        "清朝", "明朝", "唐朝", "宋朝",
+        "工业革命", "辛亥革命", "法国大革命", "鸦片战争",
+        "19th century", "20th century", "19世纪", "20世纪",
+        "war", "revolution", "dynasty", "empire",
+        "战争", "革命", "王朝", "帝国", "圆明园", "故宫"
+    ]
+
+    has_broad_topic = any(x in t for x in broad_topic_terms)
+    has_development = any(x in t for x in development_terms)
+    has_grounding = any(x in t for x in grounding_terms)
+
+    return has_broad_topic and has_development and not has_grounding
+
+
 async def main() -> None:
     set_tracing_disabled(True)
     print_header()
@@ -395,6 +435,12 @@ async def main() -> None:
         try:
             if looks_like_thanks(user_input):
                 answer = smalltalk_reply(user_input)
+                print(f"Assistant: {answer}\n")
+                history.append({"role": "assistant", "content": answer})
+                continue
+
+            if looks_like_too_broad_nonhomework_history(user_input):
+                answer = build_reject_message("too_broad_or_ungrounded_history")
                 print(f"Assistant: {answer}\n")
                 history.append({"role": "assistant", "content": answer})
                 continue
@@ -456,7 +502,9 @@ Question:
                 answer = result.final_output
 
             elif decision.route == "history":
-                if looks_like_history_trivia_not_homework(user_input) and not looks_like_foundational_history_question(user_input):
+                if looks_like_too_broad_nonhomework_history(user_input):
+                    answer = build_reject_message("too_broad_or_ungrounded_history")
+                elif looks_like_history_trivia_not_homework(user_input) and not looks_like_foundational_history_question(user_input):
                     answer = build_reject_message("history_trivia_not_homework")
                 else:
                     history_prompt = f"""
