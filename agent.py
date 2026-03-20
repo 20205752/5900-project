@@ -194,9 +194,14 @@ Classify the user's input into exactly one route:
 - reject
 
 Definitions:
-- math: computational math, theoretical math, logic, proofs, algebra, geometry, discrete math, abstract algebra
-- physics: mechanics, electricity, magnetism, waves, optics, thermodynamics, physical problem solving
-- chemistry: atoms, bonds, equations, stoichiometry, acids/bases, pH, thermochemistry
+- math: computational math, theoretical math, logic, proofs, algebra, geometry,
+  discrete math, abstract algebra, quantitative reasoning, estimation, units,
+  coordinates, distance calculation, rate problems, percentage problems, and
+  real-world mathematical modeling
+- physics: mechanics, electricity, magnetism, waves, optics, thermodynamics,
+  physical problem solving
+- chemistry: atoms, bonds, equations, stoichiometry, acids/bases, pH,
+  thermochemistry
 - history: educational history questions with meaningful historical context or significance
 - summary: explicit request to summarize or recap the conversation
 - profile: user states their level/background
@@ -206,13 +211,73 @@ Definitions:
 Important rules:
 1. Theoretical math is valid math.
 2. Real-world quantitative reasoning is still math.
-3. Current politics or current office-holders are NOT history homework.
-4. Narrow institutional trivia is not valid history tutoring.
-5. Overly broad pseudo-history questions with no clear historical grounding should be rejected.
-6. Travel planning should be rejected.
-7. Harmful or dangerous requests should be rejected.
-8. If user says something like "I'm a university student", use profile and extract level if possible.
-9. If user asks for a summary/recap, use summary.
+3. Applied math in real-world settings is math, not a non-homework domain.
+   This includes:
+   - distance between two cities
+   - coordinate distance
+   - travel distance as a calculation problem
+   - rates, time, speed, estimation, geometry, and unit conversion
+4. If the user asks how to compute or calculate something, prefer math when the core task is numerical reasoning.
+5. Distinguish carefully between:
+   - math: "How do I compute the distance between Hong Kong and Shenzhen?"
+   - reject/travel: "What is the best way to travel from Hong Kong to Shenzhen?"
+6. Current politics or current office-holders are NOT history homework.
+7. Narrow institutional trivia is not valid history tutoring.
+8. Overly broad pseudo-history questions with no clear historical grounding should be rejected.
+9. Travel planning should be rejected.
+10. Harmful or dangerous requests should be rejected.
+11. If user says something like "I'm a university student", use profile and extract level if possible.
+12. If user asks for a summary/recap, use summary.
+
+History-specific rule:
+13. Foundational factual questions about major countries, major political leaders,
+    monarchs, emperors, presidents, prime ministers, dynasties, wars, revolutions,
+    empires, and republics should usually be routed to history.
+14. Questions like "Who was the first president of France?" are history, not reject.
+15. Questions about the first ruler, first president, first emperor, or first king
+    of a historically significant state are usually valid history questions.
+16. Do not confuse foundational history with narrow local trivia.
+17. For example:
+    - valid history: "Who was the first president of France?"
+    - valid history: "法国的第一任总统是谁？"
+    - valid history: "Who was the first emperor of Rome?"
+    - reject: "Who was the first dean of a specific university?"
+    - reject: "When was a campus library built?"
+
+Routing examples:
+
+User: I want to know how to compute the distance between two cities like Hong Kong and Shenzhen
+Output route: math
+
+User: What formula gives the distance between Hong Kong and Shenzhen?
+Output route: math
+
+User: How can I estimate the distance between two points on a map?
+Output route: math
+
+User: If a car travels 80 km/h for 3 hours, how far does it go?
+Output route: math
+
+User: What is the best way to travel from Hong Kong to Shenzhen?
+Output route: reject
+
+User: Which train should I take from Hong Kong to Shenzhen?
+Output route: reject
+
+User: Plan my trip from Hong Kong to Shenzhen.
+Output route: reject
+
+User: Can you explain Peano arithmetic?
+Output route: math
+
+User: Who was the first president of France?
+Output route: history
+
+User: 法国的第一任总统是谁？
+Output route: history
+
+User: Who is the president of France?
+Output route: reject
 
 When rejecting, provide one reject_reason from:
 - not_homework_domain
@@ -236,6 +301,8 @@ Allow:
 - questions about causes, effects, significance, comparison, interpretation
 - foundational factual questions about major historical figures/events/states
 - questions with educational value in history
+- foundational questions about first presidents, first emperors, first kings,
+  founders of major states, and first leaders of historically significant countries
 
 Reject with allowed=false when:
 1. the question is narrow institutional/local trivia
@@ -243,10 +310,15 @@ Reject with allowed=false when:
    - first president/dean/head of a university
    - when a campus building or library was built
 2. the question is too broad or weakly grounded historically
-   examples:
-   - vague development of humanity/society/entertainment with no time/place/course context
 3. the question is about current politics or current office-holders
 4. the question is not really history
+
+Critical distinction:
+- "Who was the first president of France?" -> allowed=true
+- "法国的第一任总统是谁？" -> allowed=true
+- "Who was the first emperor of Rome?" -> allowed=true
+- "Who was the first dean of a university?" -> allowed=false
+- "When was a local campus building constructed?" -> allowed=false
 
 Use reject_reason from:
 - history_trivia_not_homework
