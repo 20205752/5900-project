@@ -53,7 +53,16 @@ def build_azure_model() -> OpenAIChatCompletionsModel:
 
 
 class RouteDecision(BaseModel):
-    route: Literal["math", "history", "summary", "profile", "smalltalk", "reject"]
+    route: Literal[
+        "math",
+        "physics",
+        "chemistry",
+        "history",
+        "summary",
+        "profile",
+        "smalltalk",
+        "reject",
+    ]
     reason: str
     reject_reason: Optional[str] = None
     extracted_level: Optional[str] = None
@@ -103,6 +112,8 @@ You are the policy/router for a multi-turn homework tutoring agent.
 
 Classify the user's input into exactly one route:
 - math
+- physics
+- chemistry
 - history
 - summary
 - profile
@@ -111,6 +122,12 @@ Classify the user's input into exactly one route:
 
 Allowed:
 - math questions, including both computational and theoretical math
+- physics questions (high-school / university level), including mechanics,
+  electricity and magnetism, waves and optics, thermodynamics, and
+  quantitative problem solving
+- chemistry questions (high-school / university level), including atomic and
+  bonding structure, balancing chemical equations, stoichiometry, reaction
+  types, and basic thermochemistry
 - applied math questions in real-world settings such as distance, geometry,
   estimation, percentages, rates, units, coordinates, city-centre modelling,
   and quantitative reasoning
@@ -123,6 +140,8 @@ Allowed:
 
 Return:
 - route="math" for valid math tutoring questions
+- route="physics" for valid physics tutoring questions
+- route="chemistry" for valid chemistry tutoring questions
 - route="history" for valid history tutoring questions
 - route="summary" only when the user explicitly asks to summarise or recap the conversation
 - route="profile" when the user specifies their level/background
@@ -130,7 +149,7 @@ Return:
 - route="reject" otherwise
 
 Important:
-1. A valid math/history question does NOT need to explicitly mention homework.
+1. A valid math/physics/chemistry/history question does NOT need to explicitly mention homework.
 2. Real-world math questions are still math questions.
    Example: computing the distance between two cities is math, not travel advice.
 3. Theoretical mathematics questions are also valid math homework.
@@ -231,6 +250,85 @@ Teaching rules:
 """,
 )
 
+physics_tutor_agent = Agent(
+    name="Physics Tutor",
+    model=azure_model,
+    instructions="""
+You are a supportive physics homework tutor.
+
+You can help with:
+- mechanics: kinematics, Newton's laws, forces, free-body diagrams
+- energy and momentum: work-energy theorem, conservation ideas
+- electricity and magnetism: circuits basics, EM induction concepts (as appropriate)
+- waves and optics: wave equations, reflection/refraction (as appropriate)
+- basic thermodynamics: heat, temperature, simple laws (as appropriate)
+- units, dimensional analysis, and quantitative problem solving
+- practice exercise generation
+
+Style rules:
+- Be encouraging, respectful, and human.
+- Never shame the user.
+- Keep explanations concise, human, and educational.
+
+Age/level adaptation:
+- child: use very simple words, short sentences, and concrete examples.
+- middle_school: explain clearly step by step, avoid too much abstraction.
+- high_school: explain both steps and the underlying idea.
+- university_year_1: if the topic is very basic, briefly note that it is a foundational concept at this level, then explain efficiently.
+- university: be concise, structured, and slightly more formal.
+- general: be clear and balanced.
+
+Teaching rules:
+- Explain step by step. If needed, identify the physical model (e.g., projectile motion, forces, energy approach).
+- When solving word problems, extract known/unknown variables and state key assumptions (idealizations).
+- Use units consistently; show key conversions when relevant.
+- If the user asks for practice, generate a few exercises (with hints first unless they request full solutions).
+
+Safety / scope:
+- If the user requests harmful or dangerous instructions (e.g., weaponization), refuse politely and steer back to safe physics study.
+""",
+:)
+
+chemistry_tutor_agent = Agent(
+    name="Chemistry Tutor",
+    model=azure_model,
+    instructions="""
+You are a supportive chemistry homework tutor.
+
+You can help with:
+- atomic structure, periodic table trends, and chemical bonding
+- balancing chemical equations
+- stoichiometry and reaction calculations (moles, limiting reagent, yield)
+- types of reactions and basic reaction mechanisms (at a homework-appropriate level)
+- acids and bases, and basic pH reasoning (as appropriate)
+- basic thermochemistry ideas (endothermic/exothermic, simple enthalpy reasoning)
+- practice exercise generation
+
+Style rules:
+- Be clear, respectful, and concise.
+- Never shame the user.
+- Keep explanations educational and easy to follow.
+
+Age/level adaptation:
+- child: use very simple words, short sentences, and concrete examples.
+- middle_school: explain the main ideas and steps clearly.
+- high_school: explain both the procedure and the chemistry reasoning behind it.
+- university_year_1: if the topic is very basic, briefly note that it is a foundational concept at this level, then explain efficiently.
+- university: be more structured and slightly more formal.
+- general: be clear and balanced.
+
+Teaching rules:
+- Start by identifying the topic (e.g., stoichiometry vs balancing equations).
+- For reaction questions: show how to balance the equation, then do the stoichiometry steps.
+- For calculations: show units and keep the math consistent.
+- If the user asks for practice, generate a few exercises suitable for their level (with hints first unless they request full answers).
+
+Safety / scope:
+- Do not provide instructions for making harmful substances.
+- If the user requests dangerous lab procedures, provide high-level educational guidance and safety-oriented refusal.
+""",
+:)
+
 history_tutor_agent = Agent(
     name="History Tutor",
     model=azure_model,
@@ -301,7 +399,7 @@ If the conversation is short, keep the summary to 2-4 sentences.
 
 
 def print_header() -> None:
-    print("Welcome to SmartTutor, your personal math and history homework tutor.")
+    print("Welcome to SmartTutor, your personal math, physics and chemistry homework tutor (plus history).")
     print("What can I help you today?")
     print("Type 'exit' or 'quit' to stop.")
     print()
@@ -389,10 +487,10 @@ def smalltalk_reply(text: str) -> str:
 
     if t in {"hi", "hello", "hey", "你好", "您好", "bonjour", "salut"}:
         if lang == "zh":
-            return "你好。你想让我帮你解答什么数学作业或历史作业问题？"
+            return "你好。你想让我帮你解答什么数学、物理、化学或历史作业问题？"
         if lang == "fr":
-            return "Bonjour. Quelle question de devoir de mathématiques ou d’histoire voulez-vous que j’explique ?"
-        return "Hello. What math or history homework question would you like help with?"
+            return "Bonjour. Quelle question de devoir de mathématiques, de physique, de chimie ou d’histoire voulez-vous que j’explique ?"
+        return "Hello. What math, physics, chemistry, or history homework question would you like help with?"
 
     if t in {"bye", "goodbye", "see you", "再见", "au revoir"}:
         if lang == "zh":
@@ -413,29 +511,29 @@ def build_reject_message(reject_reason: Optional[str], user_input: str) -> str:
 
     reason_map = {
         "zh": {
-            "not_homework_domain": "这是一个不属于数学作业或历史作业范畴的问题，所以我不能回答。",
-            "unsafe_or_inappropriate": "这是一个危险或不适当的问题，不属于数学作业或历史作业的正常辅导范围，所以我不能回答。",
+            "not_homework_domain": "这是一个不属于数学、物理、化学或历史作业范畴的问题，所以我不能回答。",
+            "unsafe_or_inappropriate": "这是一个危险或不适当的问题，不属于数学、物理、化学或历史作业的正常辅导范围，所以我不能回答。",
             "history_trivia_not_homework": "这是一个狭窄的历史事实查询问题，而不是典型的历史作业问题，所以我不能回答。",
-            "too_broad_or_ungrounded_history": "这是一个过于宽泛、缺少明确学科背景的问题，不属于具体的数学作业或历史作业问题，所以我不能回答。",
+            "too_broad_or_ungrounded_history": "这是一个过于宽泛、缺少明确学科背景的问题，不属于具体的数学、物理、化学或历史作业问题，所以我不能回答。",
         },
         "en": {
-            "not_homework_domain": "This is not a math homework or history homework question, so I cannot answer it.",
-            "unsafe_or_inappropriate": "This is a dangerous or inappropriate question, and it does not belong to normal math or history homework tutoring, so I cannot answer it.",
+            "not_homework_domain": "This is not a math, physics, chemistry, or history homework question, so I cannot answer it.",
+            "unsafe_or_inappropriate": "This is a dangerous or inappropriate question, and it does not belong to normal math/physics/chemistry/history homework tutoring, so I cannot answer it.",
             "history_trivia_not_homework": "This is a narrow historical fact-lookup question rather than a typical history homework question, so I cannot answer it.",
-            "too_broad_or_ungrounded_history": "This question is too broad and does not have a clear math or history homework context, so I cannot answer it.",
+            "too_broad_or_ungrounded_history": "This question is too broad and does not have a clear math/physics/chemistry/history homework context, so I cannot answer it.",
         },
         "fr": {
-            "not_homework_domain": "Ce n’est pas une question de devoir de mathématiques ou d’histoire, donc je ne peux pas y répondre.",
-            "unsafe_or_inappropriate": "C’est une question dangereuse ou inappropriée, qui ne relève pas d’un accompagnement normal en devoirs de mathématiques ou d’histoire, donc je ne peux pas y répondre.",
+            "not_homework_domain": "Ce n’est pas une question de devoir de mathématiques, de physique, de chimie ou d’histoire, donc je ne peux pas y répondre.",
+            "unsafe_or_inappropriate": "C’est une question dangereuse ou inappropriée, qui ne relève pas d’un accompagnement normal en devoirs de mathématiques, de physique, de chimie ou d’histoire, donc je ne peux pas y répondre.",
             "history_trivia_not_homework": "C’est une question de fait historique très étroite, et non une question typique de devoir d’histoire, donc je ne peux pas y répondre.",
-            "too_broad_or_ungrounded_history": "Cette question est trop large et n’a pas de contexte clair de devoir de mathématiques ou d’histoire, donc je ne peux pas y répondre.",
+            "too_broad_or_ungrounded_history": "Cette question est trop large et n’a pas de contexte clair de devoir de mathématiques, de physique, de chimie ou d’histoire, donc je ne peux pas y répondre.",
         },
     }
 
     fallback_map = {
-        "zh": "这个问题不属于数学作业或历史作业的范畴，所以我不能回答。",
-        "en": "This question does not fall within math homework or history homework tutoring, so I cannot answer it.",
-        "fr": "Cette question ne relève pas d’un devoir de mathématiques ou d’histoire, donc je ne peux pas y répondre.",
+        "zh": "这个问题不属于数学、物理、化学或历史作业的范畴，所以我不能回答。",
+        "en": "This question does not fall within math/physics/chemistry/history homework tutoring, so I cannot answer it.",
+        "fr": "Cette question ne relève pas d’un devoir de mathématiques, de physique, de chimie ou d’histoire, donc je ne peux pas y répondre.",
     }
 
     lang_map = reason_map.get(lang, reason_map["en"])
@@ -663,6 +761,26 @@ Question:
                 result = await Runner.run(math_tutor_agent, math_prompt)
                 answer = result.final_output
 
+            elif decision.route == "physics":
+                physics_prompt = f"""
+User level: {describe_level(profile.level)}
+
+Question:
+{user_input}
+"""
+                result = await Runner.run(physics_tutor_agent, physics_prompt)
+                answer = result.final_output
+
+            elif decision.route == "chemistry":
+                chemistry_prompt = f"""
+User level: {describe_level(profile.level)}
+
+Question:
+{user_input}
+"""
+                result = await Runner.run(chemistry_tutor_agent, chemistry_prompt)
+                answer = result.final_output
+
             elif decision.route == "history":
                 if looks_like_too_broad_nonhomework_history(user_input):
                     answer = build_reject_message("too_broad_or_ungrounded_history", user_input)
@@ -680,7 +798,12 @@ Question:
 
             else:
                 if decision.confidence == "low":
-                    fallback_prompt = f"""
+                    # Router was uncertain and chose `reject`. Try each tutor in turn
+                    # to recover legitimate homework questions.
+                    answer = None
+
+                    # 1) Math
+                    math_fallback_prompt = f"""
 User level: {describe_level(profile.level)}
 
 Question:
@@ -690,11 +813,79 @@ If this looks like a valid math tutoring question, answer it as math help.
 If it clearly does not belong to math tutoring, reply exactly with:
 __REJECT__
 """
-                    fallback_result = await Runner.run(math_tutor_agent, fallback_prompt)
-                    fallback_answer = str(fallback_result.final_output).strip()
-                    if fallback_answer != "__REJECT__":
-                        answer = fallback_answer
-                    else:
+                    math_fallback_result = await Runner.run(
+                        math_tutor_agent, math_fallback_prompt
+                    )
+                    math_fallback_answer = str(
+                        math_fallback_result.final_output
+                    ).strip()
+                    if math_fallback_answer != "__REJECT__":
+                        answer = math_fallback_answer
+
+                    # 2) Physics
+                    if answer is None:
+                        physics_fallback_prompt = f"""
+User level: {describe_level(profile.level)}
+
+Question:
+{user_input}
+
+If this looks like a valid physics tutoring question, answer it as physics help.
+If it clearly does not belong to physics tutoring, reply exactly with:
+__REJECT__
+"""
+                        physics_fallback_result = await Runner.run(
+                            physics_tutor_agent, physics_fallback_prompt
+                        )
+                        physics_fallback_answer = str(
+                            physics_fallback_result.final_output
+                        ).strip()
+                        if physics_fallback_answer != "__REJECT__":
+                            answer = physics_fallback_answer
+
+                    # 3) Chemistry
+                    if answer is None:
+                        chemistry_fallback_prompt = f"""
+User level: {describe_level(profile.level)}
+
+Question:
+{user_input}
+
+If this looks like a valid chemistry tutoring question, answer it as chemistry help.
+If it clearly does not belong to chemistry tutoring, reply exactly with:
+__REJECT__
+"""
+                        chemistry_fallback_result = await Runner.run(
+                            chemistry_tutor_agent, chemistry_fallback_prompt
+                        )
+                        chemistry_fallback_answer = str(
+                            chemistry_fallback_result.final_output
+                        ).strip()
+                        if chemistry_fallback_answer != "__REJECT__":
+                            answer = chemistry_fallback_answer
+
+                    # 4) History
+                    if answer is None:
+                        history_fallback_prompt = f"""
+User level: {describe_level(profile.level)}
+
+Question:
+{user_input}
+
+If this looks like a valid history tutoring question, answer it as history help.
+If it clearly does not belong to history tutoring, reply exactly with:
+__REJECT__
+"""
+                        history_fallback_result = await Runner.run(
+                            history_tutor_agent, history_fallback_prompt
+                        )
+                        history_fallback_answer = str(
+                            history_fallback_result.final_output
+                        ).strip()
+                        if history_fallback_answer != "__REJECT__":
+                            answer = history_fallback_answer
+
+                    if answer is None:
                         answer = build_reject_message(decision.reject_reason, user_input)
                 else:
                     answer = build_reject_message(decision.reject_reason, user_input)
