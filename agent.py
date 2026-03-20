@@ -264,6 +264,25 @@ def build_history_text(history: List[dict], max_turns: int = 16) -> str:
     return "\n".join(f"{item['role'].upper()}: {item['content']}" for item in recent)
 
 
+def detect_response_language(text: str) -> str:
+    t = text.strip()
+
+    if re.search(r"[\u4e00-\u9fff]", t):
+        return "zh"
+
+    lower_t = f" {t.lower()} "
+    french_markers = [
+        " bonjour ", " merci ", " président ", " premier ", " première ",
+        " france ", " royaume ", " qui ", " été ", " le ", " la ", " de la ",
+        " devoir ", " mathématiques ", " histoire ", " quel ", " quelle ",
+        " comment ", " pourquoi ", " qu'"
+    ]
+    if any(marker in lower_t for marker in french_markers):
+        return "fr"
+
+    return "en"
+
+
 def looks_like_thanks(text: str) -> bool:
     t = text.lower().strip()
     phrases = [
@@ -278,6 +297,8 @@ def looks_like_thanks(text: str) -> bool:
         "thx",
         "谢谢",
         "多谢",
+        "merci",
+        "merci beaucoup",
     ]
     return any(p in t for p in phrases)
 
@@ -297,40 +318,78 @@ def looks_like_summary_request(text: str) -> bool:
         "总结一下",
         "总结我们目前的对话",
         "总结一下我们聊了什么",
+        "résume",
+        "résumer",
+        "résumé",
+        "récapitule",
     ]
     return any(k in t for k in keywords)
 
 
 def smalltalk_reply(text: str) -> str:
+    lang = detect_response_language(text)
     t = text.lower().strip()
+
     if looks_like_thanks(t):
+        if lang == "zh":
+            return "不客气。"
+        if lang == "fr":
+            return "Je vous en prie."
         return "You're welcome."
-    if t in {"hi", "hello", "hey", "你好", "您好"}:
+
+    if t in {"hi", "hello", "hey", "你好", "您好", "bonjour", "salut"}:
+        if lang == "zh":
+            return "你好。你想让我帮你解答什么数学作业或历史作业问题？"
+        if lang == "fr":
+            return "Bonjour. Quelle question de devoir de mathématiques ou d’histoire voulez-vous que j’explique ?"
         return "Hello. What math or history homework question would you like help with?"
-    if t in {"bye", "goodbye", "see you", "再见"}:
+
+    if t in {"bye", "goodbye", "see you", "再见", "au revoir"}:
+        if lang == "zh":
+            return "再见。"
+        if lang == "fr":
+            return "Au revoir."
         return "Goodbye."
+
+    if lang == "zh":
+        return "好的。"
+    if lang == "fr":
+        return "D’accord."
     return "Okay."
 
 
-def build_reject_message(reject_reason: Optional[str]) -> str:
+def build_reject_message(reject_reason: Optional[str], user_input: str) -> str:
+    lang = detect_response_language(user_input)
+
     reason_map = {
-        "not_homework_domain": (
-            "这是一个不属于数学作业或历史作业范畴的问题，所以我不能回答。"
-        ),
-        "unsafe_or_inappropriate": (
-            "这是一个危险或不适当的问题，不属于数学作业或历史作业的正常辅导范围，所以我不能回答。"
-        ),
-        "history_trivia_not_homework": (
-            "这是一个狭窄的历史事实查询问题，而不是典型的历史作业问题，所以我不能回答。"
-        ),
-        "too_broad_or_ungrounded_history": (
-            "这是一个过于宽泛、缺少明确学科背景的问题，不属于具体的数学作业或历史作业问题，所以我不能回答。"
-        ),
+        "zh": {
+            "not_homework_domain": "这是一个不属于数学作业或历史作业范畴的问题，所以我不能回答。",
+            "unsafe_or_inappropriate": "这是一个危险或不适当的问题，不属于数学作业或历史作业的正常辅导范围，所以我不能回答。",
+            "history_trivia_not_homework": "这是一个狭窄的历史事实查询问题，而不是典型的历史作业问题，所以我不能回答。",
+            "too_broad_or_ungrounded_history": "这是一个过于宽泛、缺少明确学科背景的问题，不属于具体的数学作业或历史作业问题，所以我不能回答。",
+        },
+        "en": {
+            "not_homework_domain": "This is not a math homework or history homework question, so I cannot answer it.",
+            "unsafe_or_inappropriate": "This is a dangerous or inappropriate question, and it does not belong to normal math or history homework tutoring, so I cannot answer it.",
+            "history_trivia_not_homework": "This is a narrow historical fact-lookup question rather than a typical history homework question, so I cannot answer it.",
+            "too_broad_or_ungrounded_history": "This question is too broad and does not have a clear math or history homework context, so I cannot answer it.",
+        },
+        "fr": {
+            "not_homework_domain": "Ce n’est pas une question de devoir de mathématiques ou d’histoire, donc je ne peux pas y répondre.",
+            "unsafe_or_inappropriate": "C’est une question dangereuse ou inappropriée, qui ne relève pas d’un accompagnement normal en devoirs de mathématiques ou d’histoire, donc je ne peux pas y répondre.",
+            "history_trivia_not_homework": "C’est une question de fait historique très étroite, et non une question typique de devoir d’histoire, donc je ne peux pas y répondre.",
+            "too_broad_or_ungrounded_history": "Cette question est trop large et n’a pas de contexte clair de devoir de mathématiques ou d’histoire, donc je ne peux pas y répondre.",
+        },
     }
-    return reason_map.get(
-        reject_reason,
-        "这个问题不属于数学作业或历史作业的范畴，所以我不能回答。"
-    )
+
+    fallback_map = {
+        "zh": "这个问题不属于数学作业或历史作业的范畴，所以我不能回答。",
+        "en": "This question does not fall within math homework or history homework tutoring, so I cannot answer it.",
+        "fr": "Cette question ne relève pas d’un devoir de mathématiques ou d’histoire, donc je ne peux pas y répondre.",
+    }
+
+    lang_map = reason_map.get(lang, reason_map["en"])
+    return lang_map.get(reject_reason, fallback_map.get(lang, fallback_map["en"]))
 
 
 def looks_like_theoretical_math_question(text: str) -> bool:
@@ -341,18 +400,13 @@ def looks_like_theoretical_math_question(text: str) -> bool:
         "axiom", "axiomatic", "induction", "abstract algebra", "group theory",
         "ring", "field", "topology", "combinatorics", "discrete math",
         "数理逻辑", "公理", "公理化", "证明", "归纳法", "群论", "环", "域",
-        "拓扑", "组合数学", "离散数学", "皮亚诺", "皮亚诺算术"
+        "拓扑", "组合数学", "离散数学", "皮亚诺", "皮亚诺算术",
+        "arithmétique de peano", "théorie des nombres", "théorie des ensembles",
+        "logique", "preuve", "axiome", "algèbre abstraite", "théorie des groupes",
+        "anneau", "corps", "topologie", "combinatoire", "mathématiques discrètes"
     ]
 
-    math_terms = [
-        "math", "mathematics", "algebra", "geometry", "theorem",
-        "数学", "代数", "几何", "定理"
-    ]
-
-    has_theory = any(x in t for x in theory_terms)
-    has_math = any(x in t for x in math_terms)
-
-    return has_theory or has_math
+    return any(x in t for x in theory_terms)
 
 
 def looks_like_foundational_history_question(text: str) -> bool:
@@ -391,7 +445,8 @@ def looks_like_history_trivia_not_homework(text: str) -> bool:
         "university", "college", "school", "library", "campus",
         "department", "institute", "hkust", "tsinghua",
         "hong kong university of science and technology",
-        "清华大学", "香港科技大学", "图书馆", "学院", "学校", "大学", "校园", "系"
+        "清华大学", "香港科技大学", "图书馆", "学院", "学校", "大学", "校园", "系",
+        "université", "bibliothèque", "campus", "département", "institut"
     ]
 
     trivia_terms = [
@@ -399,12 +454,15 @@ def looks_like_history_trivia_not_homework(text: str) -> bool:
         "founding president", "birthday", "date of birth",
         "when was it built", "when was it founded",
         "第一任校长", "生日", "哪年修建", "哪年建成", "哪年建的", "什么时候建",
-        "第一任院长", "第一任负责人", "第一任馆长"
+        "第一任院长", "第一任负责人", "第一任馆长",
+        "premier président", "premier doyen", "date de naissance",
+        "quand a-t-il été construit", "quand a-t-il été fondé"
     ]
 
     analysis_terms = [
         "why", "how", "analyze", "analyse", "compare", "evaluation", "significance",
-        "为什么", "如何", "分析", "比较", "评价", "意义", "影响", "原因", "后果"
+        "为什么", "如何", "分析", "比较", "评价", "意义", "影响", "原因", "后果",
+        "pourquoi", "comment", "analyser", "comparer", "importance", "signification"
     ]
 
     has_institution = any(x in t for x in institution_terms)
@@ -421,12 +479,14 @@ def looks_like_too_broad_nonhomework_history(text: str) -> bool:
         "娱乐圈", "演艺圈", "影视圈", "明星圈",
         "人类", "社会", "流行文化", "娱乐产业", "文化产业",
         "humanity", "humankind", "mankind", "entertainment industry",
-        "pop culture", "society"
+        "pop culture", "society",
+        "industrie du divertissement", "culture populaire", "société", "humanité"
     ]
 
     development_terms = [
         "怎么发展", "如何发展", "是怎么发展的", "发展过程", "如何形成",
-        "how did it develop", "how has it developed", "development of"
+        "how did it develop", "how has it developed", "development of",
+        "comment cela s’est développé", "comment s’est développé", "développement de"
     ]
 
     grounding_terms = [
@@ -436,7 +496,8 @@ def looks_like_too_broad_nonhomework_history(text: str) -> bool:
         "工业革命", "辛亥革命", "法国大革命", "鸦片战争",
         "19th century", "20th century", "19世纪", "20世纪",
         "war", "revolution", "dynasty", "empire",
-        "战争", "革命", "王朝", "帝国", "圆明园", "故宫"
+        "战争", "革命", "王朝", "帝国", "圆明园", "故宫",
+        "19e siècle", "20e siècle", "guerre", "révolution", "dynastie", "empire"
     ]
 
     has_broad_topic = any(x in t for x in broad_topic_terms)
@@ -485,13 +546,13 @@ Question:
                 continue
 
             if looks_like_too_broad_nonhomework_history(user_input):
-                answer = build_reject_message("too_broad_or_ungrounded_history")
+                answer = build_reject_message("too_broad_or_ungrounded_history", user_input)
                 print(f"Assistant: {answer}\n")
                 history.append({"role": "assistant", "content": answer})
                 continue
 
             if looks_like_history_trivia_not_homework(user_input) and not looks_like_foundational_history_question(user_input):
-                answer = build_reject_message("history_trivia_not_homework")
+                answer = build_reject_message("history_trivia_not_homework", user_input)
                 print(f"Assistant: {answer}\n")
                 history.append({"role": "assistant", "content": answer})
                 continue
@@ -518,10 +579,14 @@ Question:
                 )
 
             if decision.route == "profile":
+                lang = detect_response_language(user_input)
                 profile.level = decision.extracted_level or user_input
-                answer = (
-                    f"Understood. I will tailor future answers to this level: {profile.level}."
-                )
+                if lang == "zh":
+                    answer = f"明白了。接下来我会按照这个水平来调整回答：{profile.level}。"
+                elif lang == "fr":
+                    answer = f"Compris. J’adapterai désormais mes réponses à ce niveau : {profile.level}."
+                else:
+                    answer = f"Understood. I will tailor future answers to this level: {profile.level}."
 
             elif decision.route == "summary":
                 prompt = f"""
@@ -548,9 +613,9 @@ Question:
 
             elif decision.route == "history":
                 if looks_like_too_broad_nonhomework_history(user_input):
-                    answer = build_reject_message("too_broad_or_ungrounded_history")
+                    answer = build_reject_message("too_broad_or_ungrounded_history", user_input)
                 elif looks_like_history_trivia_not_homework(user_input) and not looks_like_foundational_history_question(user_input):
-                    answer = build_reject_message("history_trivia_not_homework")
+                    answer = build_reject_message("history_trivia_not_homework", user_input)
                 else:
                     history_prompt = f"""
 User level: {profile.level}
@@ -578,9 +643,9 @@ __REJECT__
                     if fallback_answer != "__REJECT__":
                         answer = fallback_answer
                     else:
-                        answer = build_reject_message(decision.reject_reason)
+                        answer = build_reject_message(decision.reject_reason, user_input)
                 else:
-                    answer = build_reject_message(decision.reject_reason)
+                    answer = build_reject_message(decision.reject_reason, user_input)
 
             print(f"Assistant: {answer}\n")
             history.append({"role": "assistant", "content": answer})
