@@ -33,6 +33,9 @@ DEMOS: Dict[str, str] = {
     "demo-reject1": "What is the best way to travel from Hong Kong to London?",
     "demo-reject2": "What would happen if someone throws a firecracker on a busy street?",
     "demo-reject3": "Who was the first president of Hong Kong University of Science and Technology in Hong Kong?",
+    "demo-thanks": "That's helpful, thank you.",
+    "demo-false-premise": "the first president of the United Kindom",
+    "demo-queen": "the first queen of the United Kindom",
 }
 
 
@@ -117,13 +120,16 @@ Important:
 2. Real-world math questions are still math questions.
    Example: computing the distance between two cities is math, not travel advice.
 3. Do NOT classify gratitude or acknowledgement as summary.
-4. Reject travel planning questions such as:
+4. If a question is clearly about history but may contain a false or incorrect premise,
+   still route it to history instead of reject.
+5. Tolerate minor spelling mistakes and infer the most likely meaning.
+6. Reject travel planning questions such as:
    "What is the best way to travel from Hong Kong to London?"
-5. Reject harmful or dangerous requests.
-6. Reject very local institutional trivia if it is not a suitable general history homework question.
-7. If the user says something like "I'm a university year one student", use route="profile"
+7. Reject harmful or dangerous requests.
+8. Reject very local institutional trivia if it is not a suitable general history homework question.
+9. If the user says something like "I'm a university year one student", use route="profile"
    and extract a short user_level.
-8. Set confidence:
+10. Set confidence:
    - high: the route is very clear
    - medium: probably correct
    - low: ambiguous case
@@ -180,15 +186,20 @@ Style rules:
 - Be clear, respectful, and concise.
 - Adapt the explanation depth to the user's level if provided.
 - Keep a helpful and natural tone.
+- Tolerate minor spelling mistakes and interpret the user's likely meaning.
 
 Scope rules:
 - Answer general history homework questions clearly and accurately.
+- If the question contains a false or impossible premise, do not force an answer.
+  Instead, politely correct the premise and answer the closest valid interpretation if possible.
+- Example: if a country never had a president, say so clearly.
 - If a question is very local, narrow, or institutional trivia and is unlikely to be a suitable general history homework question,
   politely say so instead of forcing an answer.
 - Do not answer dangerous or unrelated non-history questions.
 
 Teaching rules:
-- Give direct answers first when appropriate, then add brief context.
+- Give the direct answer first when appropriate.
+- If needed, briefly explain why the original wording is inaccurate.
 - Keep explanations educational and easy to follow.
 """,
 )
