@@ -64,6 +64,34 @@ class UserProfile(BaseModel):
     level: str = "general"
 
 
+def normalize_level(level_text: str) -> str:
+    t = level_text.lower().strip()
+
+    if any(x in t for x in ["primary", "elementary", "小学生", "小学", "child", "kids"]):
+        return "child"
+    if any(x in t for x in ["middle school", "junior high", "初中", "middle-school"]):
+        return "middle_school"
+    if any(x in t for x in ["high school", "secondary school", "高中", "high-school"]):
+        return "high_school"
+    if any(x in t for x in ["year one", "year 1", "first year", "freshman", "大一"]):
+        return "university_year_1"
+    if any(x in t for x in ["university", "college", "本科", "大学"]):
+        return "university"
+    return "general"
+
+
+def describe_level(level: str) -> str:
+    mapping = {
+        "child": "child / primary-school level",
+        "middle_school": "middle-school level",
+        "high_school": "high-school level",
+        "university_year_1": "first-year university level",
+        "university": "university level",
+        "general": "general level",
+    }
+    return mapping.get(level, "general level")
+
+
 azure_model = build_azure_model()
 
 router_agent = Agent(
@@ -171,12 +199,25 @@ You can help with:
 - practice exercise generation
 
 Style rules:
-- Be encouraging and respectful.
+- Be encouraging, respectful, and human.
 - Never shame the user.
-- Never say the user should already know something.
-- If a topic is basic for the user's level, describe it as foundational rather than trivial.
-- If a topic is advanced for the user's level, gently say it is more advanced than typical for that level, but still help.
-- Prefer a warm and natural teaching tone.
+- Never say things like "you should already know this."
+- If a topic is basic for the user's level, gently describe it as a foundational topic.
+- If a topic is advanced for the user's level, say so gently and still help.
+
+Age/level adaptation:
+- child: use very simple words, short sentences, and concrete examples.
+- middle_school: explain clearly step by step, avoid too much abstraction.
+- high_school: explain both steps and the underlying idea.
+- university_year_1: if the topic is very basic, briefly note that it is a foundational concept at this level, then explain efficiently.
+- university: be concise, structured, and slightly more formal.
+- general: be clear and balanced.
+
+Human tone examples:
+- For very basic questions at university_year_1:
+  "This is a foundational algebra step, so let’s solve it carefully."
+- For advanced topics at university_year_1:
+  "This topic is a bit beyond typical first-year material, but I can still give you an intuitive explanation first."
 
 Teaching rules:
 - Explain clearly and step by step when solving.
@@ -185,7 +226,7 @@ Teaching rules:
 - If the user asks for practice, generate a few suitable exercises.
 - Unless the user asks otherwise, do not reveal the full solution immediately for every practice question;
   you may provide exercises first and then offer hints or solutions.
-- Adapt the difficulty to the user's level if provided.
+- Adapt the difficulty and tone to the user's level if provided.
 - Keep explanations concise, human, and educational.
 """,
 )
@@ -198,9 +239,23 @@ You are a supportive history homework tutor.
 
 Style rules:
 - Be clear, respectful, and concise.
-- Adapt the explanation depth to the user's level if provided.
 - Keep a helpful and natural tone.
+- Never shame the user.
 - Tolerate minor spelling mistakes and interpret the user's likely meaning.
+
+Age/level adaptation:
+- child: use simple language and focus on the basic story.
+- middle_school: explain the main event, people, and outcome clearly.
+- high_school: explain context, causes, and consequences.
+- university_year_1: if the question is very basic, briefly note that it is a foundational history topic, then answer clearly.
+- university: be more analytical and structured.
+- general: be clear and balanced.
+
+Human tone examples:
+- For basic questions at university_year_1:
+  "This is a foundational topic in political history, so let’s answer it clearly."
+- For more advanced questions:
+  "This goes a bit beyond an introductory overview, but I can explain the main historical interpretation."
 
 Scope rules:
 - Answer general history homework questions clearly and accurately.
@@ -224,11 +279,6 @@ Scope rules:
 - If a question is about leadership or founding roles of a specific university or local institution,
   politely refuse it as not suitable general history homework.
 - Do not answer dangerous or unrelated non-history questions.
-
-Teaching rules:
-- Give the direct answer first when appropriate.
-- If needed, briefly explain why the original wording is inaccurate.
-- Keep explanations educational and easy to follow.
 """,
 )
 
@@ -534,7 +584,7 @@ async def main() -> None:
 
             if looks_like_theoretical_math_question(user_input):
                 math_prompt = f"""
-User level: {profile.level}
+User level: {describe_level(profile.level)}
 
 Question:
 {user_input}
@@ -580,17 +630,19 @@ Question:
 
             if decision.route == "profile":
                 lang = detect_response_language(user_input)
-                profile.level = decision.extracted_level or user_input
+                raw_level = decision.extracted_level or user_input
+                profile.level = normalize_level(raw_level)
+
                 if lang == "zh":
-                    answer = f"明白了。接下来我会按照这个水平来调整回答：{profile.level}。"
+                    answer = f"明白了。接下来我会按照这个水平来调整回答：{describe_level(profile.level)}。"
                 elif lang == "fr":
-                    answer = f"Compris. J’adapterai désormais mes réponses à ce niveau : {profile.level}."
+                    answer = f"Compris. J’adapterai désormais mes réponses à ce niveau : {describe_level(profile.level)}."
                 else:
-                    answer = f"Understood. I will tailor future answers to this level: {profile.level}."
+                    answer = f"Understood. I will tailor future answers to this level: {describe_level(profile.level)}."
 
             elif decision.route == "summary":
                 prompt = f"""
-Current user level: {profile.level}
+Current user level: {describe_level(profile.level)}
 
 Conversation:
 {build_history_text(history)}
@@ -603,7 +655,7 @@ Conversation:
 
             elif decision.route == "math":
                 math_prompt = f"""
-User level: {profile.level}
+User level: {describe_level(profile.level)}
 
 Question:
 {user_input}
@@ -618,7 +670,7 @@ Question:
                     answer = build_reject_message("history_trivia_not_homework", user_input)
                 else:
                     history_prompt = f"""
-User level: {profile.level}
+User level: {describe_level(profile.level)}
 
 Question:
 {user_input}
@@ -629,7 +681,7 @@ Question:
             else:
                 if decision.confidence == "low":
                     fallback_prompt = f"""
-User level: {profile.level}
+User level: {describe_level(profile.level)}
 
 Question:
 {user_input}
